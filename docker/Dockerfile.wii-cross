@@ -1,0 +1,11 @@
+FROM devkitpro/devkitppc:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake ninja-build python3 git pkg-config ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV DEVKITPRO=/opt/devkitpro
+ENV DEVKITPPC=${DEVKITPRO}/devkitPPC
+ENV PATH="${DEVKITPPC}/bin:${DEVKITPRO}/tools/bin:${PATH}"
+
+WORKDIR /workspace

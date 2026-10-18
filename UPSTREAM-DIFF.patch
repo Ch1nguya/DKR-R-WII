@@ -1,0 +1,2033 @@
+diff --git a/runtime-recomp/CMakeLists.txt b/runtime-recomp/CMakeLists.txt
+index 3dd6d63..2ddb056 100644
+--- a/runtime-recomp/CMakeLists.txt
++++ b/runtime-recomp/CMakeLists.txt
+@@ -81,8 +81,20 @@ set(DKR_GENERATED_RSP_SOURCE "${CMAKE_CURRENT_LIST_DIR}/RecompiledRSP" CACHE PAT
+     "RSPRecomp-generated source for the selected DKR revision")
+ set(DKR_GENERATED_FILE_COUNT 0)
+ 
++option(DKR_BUILD_WII "Build native Nintendo Wii target using devkitPPC" OFF)
++option(DKR_PROFILE_FUNCS "Wii : instrumente les fonctions recompilees et echantillonne la fonction courante (profil)" OFF)
++if(DKR_PROFILE_FUNCS)
++    add_compile_definitions(DKR_PROFILE_FUNCS=1)
++endif()
++if(DKR_BUILD_WII)
++    set(DKR_RUNTIME_BUILD_RT64 OFF CACHE BOOL "" FORCE)
++    set(DKR_RUNTIME_BUILD_SDL3_INPUT_HOST OFF CACHE BOOL "" FORCE)
++    set(DKR_NETPLAY_WEBRTC OFF CACHE BOOL "" FORCE)
++    add_compile_definitions(GEKKO DKR_WII_BUILD=1)
++endif()
++
+ if(DKR_RUNTIME_BUILD_GENERATED)
+-    if(DKR_GENERATED_SOURCE_V80 STREQUAL "")
++    if(NOT DKR_BUILD_WII AND DKR_GENERATED_SOURCE_V80 STREQUAL "")
+         message(FATAL_ERROR
+             "DKR_GENERATED_SOURCE_V80 must name the generated US Rev A/v1.1 "
+             "CPU source directory. Both revision payloads are linked into the "
+@@ -207,7 +219,11 @@ target_include_directories(DKRNetplayCrypto PUBLIC
+     "${DKR_MONOCYPHER_SOURCE}/src"
+ )
+ 
+-add_library(DKRNetplayCore STATIC
++if(DKR_BUILD_WII)
++    # Wii : pas de multijoueur en ligne (voir src/game/wii_netplay_stub.cpp) ; seul le courtier d'entrees locales est conserve
++    set(DKR_NETPLAY_CORE_SOURCES src/game/netplay/netplay_types.cpp src/game/netplay/online_input_broker.cpp src/game/netplay/netplay_timeline.cpp)
++else()
++    set(DKR_NETPLAY_CORE_SOURCES
+     src/game/netplay/authoritative_state.cpp
+     src/game/netplay/authoritative_state_codec.cpp
+     src/game/determinism_state_hash.cpp
+@@ -233,6 +249,9 @@ add_library(DKRNetplayCore STATIC
+     src/game/netplay/secure_channel.cpp
+     src/game/netplay/session_transport.cpp
+     src/game/netplay/windows_firewall.cpp
++    )
++endif()
++add_library(DKRNetplayCore STATIC ${DKR_NETPLAY_CORE_SOURCES}
+ )
+ target_include_directories(DKRNetplayCore PUBLIC
+     "${CMAKE_CURRENT_LIST_DIR}/src/game"
+@@ -328,27 +347,29 @@ endif()
+ 
+ if(DKR_RUNTIME_BUILD_GENERATED)
+     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+-    include("${CMAKE_CURRENT_LIST_DIR}/cmake/LegacyMods.cmake")
+-    foreach(config IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+-        string(TOUPPER "${config}" config_upper)
+-        set_target_properties(DKRLegacyModWorker PROPERTIES
+-            RUNTIME_OUTPUT_DIRECTORY_${config_upper}
+-                "${CMAKE_BINARY_DIR}/bin/${config}/libexec/dkr-r")
+-    endforeach()
+-    set(DKR_V80_SYMBOL_MAP
+-        "${CMAKE_BINARY_DIR}/generated/dkr_v80_symbol_map.hpp")
+-    execute_process(
+-        COMMAND "${Python3_EXECUTABLE}"
+-                "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_revision_symbol_map.py"
+-                "${DKR_GENERATED_SOURCE_V80}"
+-                "dkr_v80_"
+-                "${DKR_V80_SYMBOL_MAP}"
+-        RESULT_VARIABLE DKR_SYMBOL_MAP_RESULT
+-        ERROR_VARIABLE DKR_SYMBOL_MAP_ERROR
+-    )
+-    if(NOT DKR_SYMBOL_MAP_RESULT EQUAL 0)
+-        message(FATAL_ERROR
+-            "Could not namespace the Rev A CPU payload: ${DKR_SYMBOL_MAP_ERROR}")
++    if(NOT DKR_BUILD_WII)
++        include("${CMAKE_CURRENT_LIST_DIR}/cmake/LegacyMods.cmake")
++        foreach(config IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
++            string(TOUPPER "${config}" config_upper)
++            set_target_properties(DKRLegacyModWorker PROPERTIES
++                RUNTIME_OUTPUT_DIRECTORY_${config_upper}
++                    "${CMAKE_BINARY_DIR}/bin/${config}/libexec/dkr-r")
++        endforeach()
++        set(DKR_V80_SYMBOL_MAP
++            "${CMAKE_BINARY_DIR}/generated/dkr_v80_symbol_map.hpp")
++        execute_process(
++            COMMAND "${Python3_EXECUTABLE}"
++                    "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_revision_symbol_map.py"
++                    "${DKR_GENERATED_SOURCE_V80}"
++                    "dkr_v80_"
++                    "${DKR_V80_SYMBOL_MAP}"
++            RESULT_VARIABLE DKR_SYMBOL_MAP_RESULT
++            ERROR_VARIABLE DKR_SYMBOL_MAP_ERROR
++        )
++        if(NOT DKR_SYMBOL_MAP_RESULT EQUAL 0)
++            message(FATAL_ERROR
++                "Could not namespace the Rev A CPU payload: ${DKR_SYMBOL_MAP_ERROR}")
++        endif()
+     endif()
+ 
+     # Each ROM revision contributes only its generated CPU payload. The
+@@ -367,33 +388,35 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+                 "revision ${REVISION}.")
+         endif()
+ 
+-        set(REQUIRED_INPUT_HOOKS
+-            "dkr_netplay_prepare_controller_init"
+-            "dkr_netplay_resolve_authored_input_frame"
+-            "dkr_legacy_scene_begin"
+-            "dkr_legacy_asset_api"
+-            "dkr_legacy_pi_start_dma"
+-            "dkr_legacy_track_menu"
+-            "dkr_legacy_character_event"
+-            "dkr_legacy_character_menu")
+-        foreach(REQUIRED_INPUT_HOOK IN LISTS REQUIRED_INPUT_HOOKS)
+-            set(REQUIRED_INPUT_HOOK_FOUND FALSE)
+-            foreach(GENERATED_FILE IN LISTS GENERATED_FILES)
+-                file(STRINGS "${GENERATED_FILE}" GENERATED_HOOK_MATCH
+-                    REGEX "${REQUIRED_INPUT_HOOK}" LIMIT_COUNT 1)
+-                if(GENERATED_HOOK_MATCH)
+-                    set(REQUIRED_INPUT_HOOK_FOUND TRUE)
+-                    break()
++        if(NOT DKR_BUILD_WII)
++            set(REQUIRED_INPUT_HOOKS
++                "dkr_netplay_prepare_controller_init"
++                "dkr_netplay_resolve_authored_input_frame"
++                "dkr_legacy_scene_begin"
++                "dkr_legacy_asset_api"
++                "dkr_legacy_pi_start_dma"
++                "dkr_legacy_track_menu"
++                "dkr_legacy_character_event"
++                "dkr_legacy_character_menu")
++            foreach(REQUIRED_INPUT_HOOK IN LISTS REQUIRED_INPUT_HOOKS)
++                set(REQUIRED_INPUT_HOOK_FOUND FALSE)
++                foreach(GENERATED_FILE IN LISTS GENERATED_FILES)
++                    file(STRINGS "${GENERATED_FILE}" GENERATED_HOOK_MATCH
++                        REGEX "${REQUIRED_INPUT_HOOK}" LIMIT_COUNT 1)
++                    if(GENERATED_HOOK_MATCH)
++                        set(REQUIRED_INPUT_HOOK_FOUND TRUE)
++                        break()
++                    endif()
++                endforeach()
++                if(NOT REQUIRED_INPUT_HOOK_FOUND)
++                    message(FATAL_ERROR
++                        "The US v${REVISION} generated payload is stale: required "
++                        "Patch Pipeline hook ${REQUIRED_INPUT_HOOK} is missing under "
++                        "${SOURCE_DIR}. Regenerate it from the matching policy before "
++                        "building the unified runtime.")
+                 endif()
+             endforeach()
+-            if(NOT REQUIRED_INPUT_HOOK_FOUND)
+-                message(FATAL_ERROR
+-                    "The US v${REVISION} generated payload is stale: required "
+-                    "Patch Pipeline hook ${REQUIRED_INPUT_HOOK} is missing under "
+-                    "${SOURCE_DIR}. Regenerate it from the matching policy before "
+-                    "building the unified runtime.")
+-            endif()
+-        endforeach()
++        endif()
+ 
+         add_library(${TARGET_NAME} STATIC ${GENERATED_FILES} "${WRAPPER}")
+         target_include_directories(${TARGET_NAME} PRIVATE
+@@ -421,8 +444,15 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+                     "/FI${FORCE_INCLUDE}")
+             endif()
+         else()
++            if(DKR_PROFILE_FUNCS)
++                target_compile_options(${TARGET_NAME} PRIVATE -finstrument-functions)
++            endif()
+             target_compile_options(${TARGET_NAME} PRIVATE
++                -O3
+                 -fno-strict-aliasing
++                -fomit-frame-pointer
++                -ffunction-sections
++                -fdata-sections
+                 -Wno-unused-but-set-variable
+                 -Wno-unused-variable
+                 -Wno-implicit-function-declaration
+@@ -440,10 +470,12 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+     dkr_add_recompiled_payload(
+         DKRRecompiledFuncsV77 77 "${DKR_GENERATED_SOURCE_V77}"
+         "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v77.cpp")
+-    dkr_add_recompiled_payload(
+-        DKRRecompiledFuncsV80 80 "${DKR_GENERATED_SOURCE_V80}"
+-        "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v80.cpp"
+-        "${DKR_V80_SYMBOL_MAP}")
++    if(NOT DKR_BUILD_WII)
++        dkr_add_recompiled_payload(
++            DKRRecompiledFuncsV80 80 "${DKR_GENERATED_SOURCE_V80}"
++            "${CMAKE_CURRENT_LIST_DIR}/src/game/game_payload_v80.cpp"
++            "${DKR_V80_SYMBOL_MAP}")
++    endif()
+ endif()
+ 
+ if(DKR_RUNTIME_BUILD_GENERATED)
+@@ -453,16 +485,26 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+             "No RSPRecomp output was found under ${DKR_GENERATED_RSP_SOURCE}. "
+             "Run Generate-DKR-RSP.cmd first.")
+     endif()
++    if(DKR_BUILD_WII)
++        set_source_files_properties(${DKR_GENERATED_RSP} src/game/native_audio_mixer.cpp PROPERTIES
++            COMPILE_OPTIONS "-O3;-fomit-frame-pointer;-ffast-math"
++        )
++    endif()
+     set(DKR_GAME_SOURCES
+         src/game/audio_equalizer.cpp
+         # The policy's asset hooks call into these with or without RT64; the
+         # table logic itself is DKRCustomTracksCore, via DKRLegacyModLaunch.
+         src/game/custom_tracks_hooks.cpp
++        $<$<BOOL:${DKR_BUILD_WII}>:src/game/custom_tracks.cpp>
+         src/game/dkr_save_codec.cpp
+         src/game/game_payload.cpp
+         src/game/game_main.cpp
+         src/game/game_registration.cpp
++        src/game/native_audio_mixer.cpp
+         src/game/null_renderer.cpp
++        $<$<BOOL:${DKR_BUILD_WII}>:src/game/wii_netlog.cpp>
++        $<$<BOOL:${DKR_BUILD_WII}>:src/game/wii_launcher.cpp>
++        $<$<BOOL:${DKR_PROFILE_FUNCS}>:src/game/wii_funcprof.cpp>
+         src/game/presentation_identity.cpp
+         src/game/rev_a_asset_mutex.cpp
+         src/game/rom_revision.cpp
+@@ -473,7 +515,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+         src/game/runtime_input.cpp
+         src/game/runtime_magic_codes.cpp
+         src/game/runtime_legacy_mods.cpp
+-        src/game/runtime_netplay.cpp
++        $<IF:$<BOOL:${DKR_BUILD_WII}>,src/game/wii_netplay_stub.cpp,src/game/runtime_netplay.cpp>
+         src/game/runtime_platform.cpp
+         src/game/runtime_quick_restart.cpp
+         src/game/sdl3_input_client.cpp
+@@ -484,6 +526,7 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+         src/game/runtime_telemetry.cpp
+         src/game/startup_performance.cpp
+         src/game/virtual_pak.cpp
++        $<$<BOOL:${DKR_BUILD_WII}>:src/game/wii_atomics.cpp>
+         ${DKR_GENERATED_RSP}
+     )
+     if(APPLE)
+@@ -554,12 +597,18 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+     # both platforms on the same single-runtime link graph.
+     target_link_libraries(DKRPortGame PRIVATE
+         DKRRecompiledFuncsV77
+-        DKRRecompiledFuncsV80
++        $<$<NOT:$<BOOL:${DKR_BUILD_WII}>>:DKRRecompiledFuncsV80>
+         ultramodern
+         librecomp)
+     target_link_libraries(DKRPortGame PRIVATE DKRNetplayCore)
+-    target_link_libraries(DKRPortGame PRIVATE DKRLegacyModLaunch DKRLegacyGuestIO)
+-    add_dependencies(DKRPortGame DKRLegacyModWorker)
++    if(DKR_BUILD_WII)
++        target_link_libraries(DKRPortGame PRIVATE asnd fat wiiuse bte ogc m)
++        target_link_options(DKRPortGame PRIVATE -Wl,--gc-sections -Wl,--wrap=amCreateAudioMgr)
++    endif()
++    if(NOT DKR_BUILD_WII)
++        target_link_libraries(DKRPortGame PRIVATE DKRLegacyModLaunch DKRLegacyGuestIO)
++        add_dependencies(DKRPortGame DKRLegacyModWorker)
++    endif()
+     if(MSVC)
+         target_compile_options(DKRPortGame PRIVATE /FS)
+     endif()
+@@ -649,10 +698,25 @@ if(DKR_RUNTIME_BUILD_GENERATED)
+     if(WIN32)
+         target_link_libraries(DKRPortGame PRIVATE user32 shell32 dbghelp bcrypt dxgi)
+     endif()
+-    set_target_properties(DKRPortGame PROPERTIES
+-        OUTPUT_NAME "DKR-R"
+-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+-    )
++    if(DKR_BUILD_WII)
++        set_target_properties(DKRPortGame PROPERTIES
++            OUTPUT_NAME "DKR"
++            SUFFIX ".elf"
++            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
++        )
++        add_custom_command(TARGET DKRPortGame POST_BUILD
++            COMMAND /opt/devkitpro/tools/bin/elf2dol
++                "$<TARGET_FILE:DKRPortGame>"
++                "$<TARGET_FILE_DIR:DKRPortGame>/boot.dol"
++            COMMENT "Converting DKR.elf to boot.dol"
++            VERBATIM
++        )
++    else()
++        set_target_properties(DKRPortGame PROPERTIES
++            OUTPUT_NAME "DKR-R"
++            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
++        )
++    endif()
+     if(APPLE)
+         # CMake supplies the platform Info.plist and places the executable in
+         # Contents/MacOS. RT64 selects its native Metal backend on Apple
+diff --git a/runtime-recomp/src/game/game_main.cpp b/runtime-recomp/src/game/game_main.cpp
+index 1204706..77e52ee 100644
+--- a/runtime-recomp/src/game/game_main.cpp
++++ b/runtime-recomp/src/game/game_main.cpp
+@@ -1,4 +1,9 @@
++#if defined(GEKKO)
++extern "C" void dkr_wii_launcher_run();
++extern "C" float dkr_wii_cfg(const char* key, float def);
++#endif
+ #include "game_registration.hpp"
++#include "native_audio_mixer.hpp"
+ #include "revision_addresses.hpp"
+ #include "null_renderer.hpp"
+ #include "rev_a_asset_mutex.hpp"
+@@ -57,6 +62,14 @@
+ #include <DbgHelp.h>
+ #endif
+ 
++#if defined(GEKKO)
++#include <fat.h>
++#include <gccore.h>
++#include <ogc/lwp_watchdog.h>
++void* g_wii_xfb = nullptr;
++GXRModeObj* g_wii_rmode = nullptr;
++#endif
++
+ extern RspUcodeFunc dkrAspMain;
+ 
+ namespace {
+@@ -87,7 +100,10 @@ bool ConfigurePersistentRuntimeLog(
+         error.clear();
+         std::filesystem::rename(current, previous, error);
+     }
+-#ifdef _WIN32
++#if defined(GEKKO)
++    // Keep stderr untouched on Wii so messages show directly in Dolphin / USB Gecko console
++    (void)current;
++#elif defined(_WIN32)
+     FILE* stream = nullptr;
+     if (_wfreopen_s(&stream, current.c_str(), L"w", stderr) != 0 ||
+         stream == nullptr) {
+@@ -105,6 +121,13 @@ bool ConfigurePersistentRuntimeLog(
+ }
+ 
+ std::filesystem::path DefaultConfigDirectory(const char* executable_argument) {
++#if defined(GEKKO)
++    (void)executable_argument;
++    return "sd:/apps/DKR-R/dkr-runtime-data";
++#else
++    if (executable_argument == nullptr || *executable_argument == '\0') {
++        return std::filesystem::current_path() / "dkr-runtime-data";
++    }
+     std::error_code error;
+     const std::filesystem::path executable = std::filesystem::absolute(
+         std::filesystem::u8path(executable_argument), error);
+@@ -128,13 +151,40 @@ std::filesystem::path DefaultConfigDirectory(const char* executable_argument) {
+     }
+ #endif
+     return executable_directory / "dkr-runtime-data";
++#endif
+ }
+ 
+ RspExitReason EmptyAudioTask(std::uint8_t*, std::uint32_t) {
+     return RspExitReason::Broke;
+ }
+ 
++#if defined(GEKKO)
++#include "recomp.h"
++extern "C" bool dkr_wii_audio_enabled();
++extern "C" unsigned long long g_prof_audio_ticks;
++extern "C" void __real_amCreateAudioMgr(uint8_t* rdram, recomp_context* ctx);
++
++extern "C" void __wrap_amCreateAudioMgr(uint8_t* rdram, recomp_context* ctx) {
++    // Preserve 100% original N64 fidelity (40 voices, full reverb) by default
++    const int max_v = static_cast<int>(dkr_wii_cfg("voices", 40.0f));
++    const int bigroom = static_cast<int>(dkr_wii_cfg("bigroom", 1.0f));
++    if (max_v > 0 && max_v < 40) {
++        MEM_W(0x00, ctx->r4) = max_v;
++        MEM_W(0x04, ctx->r4) = max_v;
++    }
++    if (!bigroom) {
++        MEM_B(0x1D, ctx->r4) = 0; // Disable heavy BIGROOM reverb only if explicitly requested
++    }
++    __real_amCreateAudioMgr(rdram, ctx);
++}
++#endif
++
+ RspUcodeFunc* GetRspMicrocode(const OSTask* task) {
++#if defined(GEKKO)
++    if (task->t.type == M_AUDTASK && !dkr_wii_audio_enabled()) {
++        return EmptyAudioTask; // audio=0 dans sd:/apps/DKR-R/dkr-wii.cfg
++    }
++#endif
+     if (task->t.type == M_AUDTASK &&
+         task->t.ucode == dkr::runtime::revision_addresses::AspMainTextStart) {
+         // DKR can submit a zero-command audio frame when the host-reported AI
+@@ -145,7 +195,21 @@ RspUcodeFunc* GetRspMicrocode(const OSTask* task) {
+             return EmptyAudioTask;
+         }
+         return +[](std::uint8_t* rdram, std::uint32_t ucode_address) {
++#if defined(GEKKO)
++            const unsigned long long t0 = gettime();
++            // Native HLE ABI interpreter (bit-faithful DSP, 40 voices + reverb kept).
++            // hleaudio=0 in dkr-wii.cfg forces the recompiled microcode for A/B tests.
++            static const bool use_hle = dkr_wii_cfg("hleaudio", 1.0f) != 0.0f;
++            RspExitReason reason = RspExitReason::Broke;
++            if (!use_hle || !dkr_native_audio_process(
++                                rdram, reinterpret_cast<const OSTask*>(&dmem[0xFC0]))) {
++                reason = dkrAspMain(rdram, ucode_address);
++            }
++            g_prof_audio_ticks += gettime() - t0;
++            return reason;
++#else
+             return dkrAspMain(rdram, ucode_address);
++#endif
+         };
+     }
+     std::fprintf(stderr,
+@@ -294,6 +358,8 @@ LONG WINAPI RuntimeCrashFilter(EXCEPTION_POINTERS* exception) {
+     return EXCEPTION_EXECUTE_HANDLER;
+ }
+ 
++#elif defined(GEKKO)
++void InstallRuntimeSignalHandlers() {}
+ #else
+ 
+ void RuntimeSignalHandler(int signal_number) {
+@@ -394,7 +460,8 @@ bool ParseLaunchOptions(int argc, char** argv, LaunchOptions& options,
+         }
+     }
+     if (options.config_directory.empty()) {
+-        options.config_directory = DefaultConfigDirectory(argv[0]);
++        const char* exe_arg = (argc > 0 && argv != nullptr) ? argv[0] : nullptr;
++        options.config_directory = DefaultConfigDirectory(exe_arg);
+     }
+     return true;
+ }
+@@ -611,6 +678,59 @@ int DkrMain(int argc, char** argv) {
+     }
+ #endif
+ 
++#if defined(GEKKO)
++    VIDEO_Init();
++    g_wii_rmode = VIDEO_GetPreferredMode(nullptr);
++    g_wii_xfb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(g_wii_rmode));
++    VIDEO_ClearFrameBuffer(g_wii_rmode, g_wii_xfb, COLOR_BLACK); // memoire d'XFB non initialisee sur console reelle (bande de pixels aleatoires)
++    console_init(g_wii_xfb, 20, 8, g_wii_rmode->fbWidth, 120, g_wii_rmode->fbWidth * VI_DISPLAY_PIX_SZ);
++    VIDEO_Configure(g_wii_rmode);
++    VIDEO_SetNextFramebuffer(g_wii_xfb);
++    VIDEO_SetBlack(FALSE);
++    VIDEO_Flush();
++    VIDEO_WaitVSync();
++    if (g_wii_rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
++
++    std::printf("\x1b[2;0H"); // Position du curseur
++    std::printf("==================================================\n");
++    std::printf("   DKR-R - Diddy Kong Racing Recompiled (Wii)     \n");
++    std::printf("==================================================\n\n");
++    std::printf("[boot] Initializing file systems (SD / USB)...\n");
++
++    if (!fatInitDefault()) {
++        std::printf("[boot][wii][error] fatInitDefault failed!\n");
++    } else {
++        std::printf("[boot][wii] File systems mounted successfully.\n");
++    }
++    dkr_wii_launcher_run(); // ecran de lancement (reglages) ; `launcher=0` dans dkr-wii.cfg le saute
++    {   // cfg video : 0 = mode propose par la console, 1 = 480i, 2 = 480p (uniquement si un cable composante est detecte)
++        const int vm = static_cast<int>(dkr_wii_cfg("video", 0.0F));
++        if (vm == 1 || vm == 2) {
++            const bool pal = CONF_GetVideo() == CONF_VIDEO_PAL;
++            GXRModeObj* m = nullptr;
++            if (vm == 2) {
++                if (VIDEO_HaveComponentCable()) m = pal ? &TVEurgb60Hz480Prog : &TVNtsc480Prog;
++            } else {
++                m = pal ? &TVEurgb60Hz480IntDf : &TVNtsc480IntDf;
++            }
++            if (m != nullptr && m != g_wii_rmode) {
++                g_wii_rmode = m;
++                VIDEO_Configure(m);
++                VIDEO_ClearFrameBuffer(m, g_wii_xfb, COLOR_BLACK);
++                VIDEO_SetNextFramebuffer(g_wii_xfb);
++                VIDEO_Flush();
++                VIDEO_WaitVSync();
++                if (m->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
++            }
++        }
++    }
++    if (static_cast<int>(dkr_wii_cfg("diag", 0.0F)) != 1) {
++        // Pas de console de diagnostic : les printf du demarrage ne doivent pas s'ecrire sur l'image (console redirigee hors ecran)
++        static u8 hidden_console[640 * 128 * 2] __attribute__((aligned(32)));
++        console_init(hidden_console, 0, 0, 640, 120, 640 * VI_DISPLAY_PIX_SZ);
++    }
++#endif
++
+     LaunchOptions launch{};
+     std::string rom_error;
+     if (!ParseLaunchOptions(argc, argv, launch, rom_error)) {
+@@ -621,6 +741,34 @@ int DkrMain(int argc, char** argv) {
+         return 2;
+     }
+     std::filesystem::path& rom_path = launch.rom_path;
++
++#if defined(GEKKO)
++    if (rom_path.empty()) {
++        std::printf("[boot][wii] Searching for ROM on SD/USB...\n");
++        const char* const candidate_paths[] = {
++            "sd:/apps/DKR-R/dkr.z64",
++            "sd:/apps/DKR-R/rom.z64",
++            "sd:/roms/dkr.z64",
++            "sd:/roms/n64/dkr.z64",
++            "sd:/dkr.z64",
++            "usb:/apps/DKR-R/dkr.z64",
++            "usb:/roms/dkr.z64",
++            "usb:/dkr.z64"
++        };
++        for (const char* candidate : candidate_paths) {
++            std::error_code ec;
++            if (std::filesystem::exists(candidate, ec)) {
++                std::printf("[boot][wii] -> FOUND: %s\n", candidate);
++                std::fprintf(stderr, "[boot][wii] auto-detected ROM: %s\n", candidate);
++                rom_path = candidate;
++                break;
++            } else {
++                std::printf("[boot][wii]    not found: %s\n", candidate);
++            }
++        }
++    }
++#endif
++
+     std::shared_ptr<const dkr::mods::PreparedModLaunch> prepared_mods;
+     const std::filesystem::path& config_directory = launch.config_directory;
+     const unsigned timeout_seconds = launch.timeout_seconds;
+@@ -755,7 +903,23 @@ int DkrMain(int argc, char** argv) {
+ #else
+     const ultramodern::renderer::WindowHandle window_handle{};
+     if (rom_path.empty()) {
++#if defined(GEKKO)
++        std::printf("\n\n[ERROR] ROM not found!\n");
++        std::printf("Please place 'dkr.z64' in one of these paths:\n");
++        std::printf("  - sd:/apps/DKR-R/dkr.z64\n");
++        std::printf("  - sd:/roms/dkr.z64\n");
++        std::printf("  - sd:/dkr.z64\n\n");
++        std::fprintf(stderr,
++                     "[boot][wii] ROM not found! Please place 'dkr.z64' in 'sd:/apps/DKR-R/dkr.z64' or 'sd:/roms/dkr.z64'.\n");
++        // Keep screen visible in Dolphin
++        for (int sec = 10; sec > 0; --sec) {
++            std::printf("\rExiting in %d seconds...  ", sec);
++            std::fflush(stdout);
++            for (int f = 0; f < 60; ++f) VIDEO_WaitVSync();
++        }
++#else
+         std::fprintf(stderr, "The diagnostic runtime requires a ROM path.\n");
++#endif
+         dkr::runtime::platform::shutdown();
+         return 2;
+     }
+@@ -894,6 +1058,7 @@ int DkrMain(int argc, char** argv) {
+         dkr::runtime::magic_codes::begin_game_session(online_magic_codes);
+         dkr::runtime::netplay::reset_runtime_state();
+         dkr::runtime::rev_a_asset_mutex::reset_statistics();
++#if !defined(GEKKO)
+         dkr::runtime::legacy::begin_session(nullptr);
+         try {
+             // Launcher preparation already ran on a worker with a progress
+@@ -908,6 +1073,7 @@ int DkrMain(int argc, char** argv) {
+             std::fprintf(stderr,"[legacy][launch] %s\n",error.what());
+             dkr::runtime::platform::shutdown();return 4;
+         }
++#endif
+ #if DKR_LEGACY_QUALIFICATION
+         if (const char* recipe = std::getenv("DKR_LEGACY_QUALIFICATION_RECIPE")) {
+             if (dkr::runtime::netplay::session().active()) {
+diff --git a/runtime-recomp/src/game/game_payload.cpp b/runtime-recomp/src/game/game_payload.cpp
+index f89b39a..68f8f62 100644
+--- a/runtime-recomp/src/game/game_payload.cpp
++++ b/runtime-recomp/src/game/game_payload.cpp
+@@ -5,7 +5,9 @@
+ namespace dkr::runtime {
+ 
+ const GamePayload& payload_v77();
++#ifndef DKR_WII_BUILD
+ const GamePayload& payload_v80();
++#endif
+ 
+ namespace {
+ 
+@@ -17,8 +19,10 @@ const GamePayload* payload_for(rom::Revision revision) {
+     switch (revision) {
+     case rom::Revision::UsV77:
+         return &payload_v77();
++#ifndef DKR_WII_BUILD
+     case rom::Revision::UsV80:
+         return &payload_v80();
++#endif
+     default:
+         return nullptr;
+     }
+diff --git a/runtime-recomp/src/game/game_payload_v77.cpp b/runtime-recomp/src/game/game_payload_v77.cpp
+index ca5f52a..6905049 100644
+--- a/runtime-recomp/src/game/game_payload_v77.cpp
++++ b/runtime-recomp/src/game/game_payload_v77.cpp
+@@ -26,7 +26,7 @@ const dkr::runtime::GamePayload& dkr::runtime::payload_v77() {
+     static const GamePayload payload{
+         .revision = rom::Revision::UsV77,
+         .rom_hash = rom::kUsV77Xxh3,
+-        .entrypoint = recomp_entrypoint,
++        .entrypoint = mainproc,
+         .music_volume_set = music_volume_set,
+         .main_game_loop = main_game_loop,
+         .get_settings = get_settings,
+diff --git a/runtime-recomp/src/game/game_registration.cpp b/runtime-recomp/src/game/game_registration.cpp
+index 41c3bf8..c443679 100644
+--- a/runtime-recomp/src/game/game_registration.cpp
++++ b/runtime-recomp/src/game/game_registration.cpp
+@@ -32,13 +32,20 @@ void UnregisterThreadContext(std::uint8_t* rdram, recomp_context* context) {
+     dkr::runtime::netplay::unregister_runtime_context(rdram, context);
+ }
+ 
++extern "C" u32 g_entrypoint_hit;
++extern "C" u32 g_entrypoint_step;
++
+ void RunDkrEntrypoint(std::uint8_t* rdram, recomp_context* context) {
++    g_entrypoint_hit++;
++    g_entrypoint_step = 1; // Entré dans RunDkrEntrypoint
+     const dkr::runtime::GamePayload* payload = dkr::runtime::active_payload();
+     if (payload == nullptr || payload->entrypoint == nullptr) {
++        g_entrypoint_step = 2; // payload null
+         ultramodern::quit();
+         return;
+     }
+ 
++    g_entrypoint_step = 3; // Réinitialisation sauvegardes
+     dkr::runtime::saves::reset_runtime_online_save_status();
+     const auto online = dkr::runtime::netplay::session().runtime_view();
+     if (online.active) {
+@@ -71,9 +78,14 @@ void RunDkrEntrypoint(std::uint8_t* rdram, recomp_context* context) {
+         // A game can return to this launcher and start again in the same
+         // process. Explicitly leave any prior online route before a local
+         // launch so single-player always reopens its ordinary EEPROM.
++        g_entrypoint_step = 4; // save route check
++#if !defined(GEKKO)
+         ultramodern::change_save_file(u8"", u8"dkr.us.v77");
++#endif
+     }
++    g_entrypoint_step = 5; // Juste avant payload->entrypoint !
+     payload->entrypoint(rdram, context);
++    g_entrypoint_step = 6; // Après retour de mainproc !
+ }
+ 
+ } // namespace
+diff --git a/runtime-recomp/src/game/netplay/datagram_socket.cpp b/runtime-recomp/src/game/netplay/datagram_socket.cpp
+index df698f7..06727c2 100644
+--- a/runtime-recomp/src/game/netplay/datagram_socket.cpp
++++ b/runtime-recomp/src/game/netplay/datagram_socket.cpp
+@@ -244,6 +244,14 @@ bool DatagramSocket::resolve(std::string_view host, std::uint16_t port,
+ 
+ std::string DatagramSocket::describe(const PeerAddress& address) {
+     if (!address) return {};
++#if defined(GEKKO)
++    const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address_ptr(address));
++    char host_str[INET_ADDRSTRLEN]{};
++    if (inet_ntop(AF_INET, &ipv4->sin_addr, host_str, sizeof(host_str)) == nullptr) {
++        return {};
++    }
++    return std::string(host_str) + ":" + std::to_string(ntohs(ipv4->sin_port));
++#else
+     std::array<char, NI_MAXHOST> host{};
+     std::array<char, NI_MAXSERV> service{};
+     if (getnameinfo(address_ptr(address), static_cast<socklen_t>(address.size),
+@@ -253,10 +261,19 @@ std::string DatagramSocket::describe(const PeerAddress& address) {
+         return {};
+     }
+     return std::string(host.data()) + ":" + service.data();
++#endif
+ }
+ 
+ std::string DatagramSocket::describe_host(const PeerAddress& address) {
+     if (!address) return {};
++#if defined(GEKKO)
++    const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address_ptr(address));
++    char host_str[INET_ADDRSTRLEN]{};
++    if (inet_ntop(AF_INET, &ipv4->sin_addr, host_str, sizeof(host_str)) == nullptr) {
++        return {};
++    }
++    return host_str;
++#else
+     std::array<char, NI_MAXHOST> host{};
+     if (getnameinfo(address_ptr(address), static_cast<socklen_t>(address.size),
+                     host.data(), static_cast<socklen_t>(host.size()),
+@@ -264,6 +281,7 @@ std::string DatagramSocket::describe_host(const PeerAddress& address) {
+         return {};
+     }
+     return host.data();
++#endif
+ }
+ 
+ } // namespace dkr::runtime::netplay
+diff --git a/runtime-recomp/src/game/netplay/network_interfaces.cpp b/runtime-recomp/src/game/netplay/network_interfaces.cpp
+index a768478..54e3738 100644
+--- a/runtime-recomp/src/game/netplay/network_interfaces.cpp
++++ b/runtime-recomp/src/game/netplay/network_interfaces.cpp
+@@ -20,6 +20,10 @@
+ #include <ws2tcpip.h>
+ #include <windows.h>
+ #include <iphlpapi.h>
++#elif defined(GEKKO)
++#include <network.h>
++#include <arpa/inet.h>
++#include <cerrno>
+ #else
+ #include <arpa/inet.h>
+ #include <cerrno>
+@@ -151,6 +155,10 @@ std::string tailscale_status_json() {
+     CloseHandle(output_read);
+     return timed_out ? std::string{} : output;
+ }
++#elif defined(GEKKO)
++std::string tailscale_status_json() {
++    return {};
++}
+ #else
+ // Match the Windows helper's bounded, shell-free behaviour. Discovery is an
+ // optional convenience and must not leave an AppImage worker blocked forever
+@@ -303,6 +311,11 @@ std::vector<NetworkInterface> enumerate_network_interfaces() {
+             }
+         }
+     }
++#elif defined(GEKKO)
++    char wii_ip[16]{};
++    if (if_config(wii_ip, nullptr, nullptr, true, 20) >= 0 && wii_ip[0] != '\0') {
++        result.push_back({"wlan0", "Wii Wi-Fi", wii_ip, false, false});
++    }
+ #else
+     ifaddrs* addresses = nullptr;
+     if (getifaddrs(&addresses) == 0) {
+diff --git a/runtime-recomp/src/game/null_renderer.cpp b/runtime-recomp/src/game/null_renderer.cpp
+index 4a3d9eb..97d9308 100644
+--- a/runtime-recomp/src/game/null_renderer.cpp
++++ b/runtime-recomp/src/game/null_renderer.cpp
+@@ -1,15 +1,144 @@
+ #include "null_renderer.hpp"
+ 
+ #include "game_registration.hpp"
++#include "revision_addresses.hpp"
+ 
+ #include "librecomp/game.hpp"
+ 
+ #include <cstdio>
+ #include <memory>
+ 
++#if defined(GEKKO)
++extern "C" float dkr_wii_cfg(const char* key, float def);
++#include <gccore.h>
++#include <ogc/lwp_watchdog.h>
++#include <malloc.h>
++#include <cstring>
++#include <vector>
++#include <cstdarg>
++#include <unordered_map>
++#include <unistd.h>
++extern void* g_wii_xfb;
++extern GXRModeObj* g_wii_rmode;
++static void* g_gx_fifo = nullptr;
++static bool g_pillarbox = false; // image 4:3 centree (bandes noires) sur une console en 16:9 : cfg aspect = 0 auto, 1 etire, 2 force les bandes
++static u16 g_view_x = 0, g_view_w = 640;
++static int g_diag_mode = 0; // cfg diag : 0 = aucun, 1 = console de diagnostic (bande noire de 128 lignes en haut), 2 = petit overlay FPS
++// Journal de diagnostic en RAM (ecrit dans sd:/apps/DKR-R/debug.txt par dkr_dump_flush : HOME ou cfg dumpflush) ; evite des milliers d'ouvertures de fichiers pendant le jeu.
++static char g_dbg_buf[512 * 1024];
++static size_t g_dbg_pos = 0;
++// Anneau des derniers evenements de dessin d'objets (G_VTX et G_TRIN) pour diagnostiquer un defaut visible a un instant precis :
++// ecrit dans debug.txt par dkr_dump_flush (combinaison de touches L + R + Start sur la manette GameCube, voir update_screen).
++constexpr u32 kRingN = 24576, kRingW = 128;
++static char g_ring_name[40] = "sd:/apps/DKR-R/ring.txt";
++static char* g_ring = nullptr;   // allouee a la demande (ring=1) : kRingN lignes de kRingW octets
++static u32 g_ring_n = 0;
++static void RingLog(const char* fmt, ...) {
++    if (g_ring == nullptr) g_ring = static_cast<char*>(std::calloc(kRingN, kRingW));
++    if (g_ring == nullptr) return;
++    va_list ap;
++    va_start(ap, fmt);
++    std::vsnprintf(g_ring + static_cast<size_t>(g_ring_n % kRingN) * kRingW, kRingW, fmt, ap);
++    va_end(ap);
++    ++g_ring_n;
++}
++static void DbgLog(const char* fmt, ...) {
++    if (g_dbg_pos + 512 >= sizeof(g_dbg_buf)) return;
++    va_list ap;
++    va_start(ap, fmt);
++    const int n = std::vsnprintf(g_dbg_buf + g_dbg_pos, 512, fmt, ap);
++    va_end(ap);
++    if (n > 0) g_dbg_pos += static_cast<size_t>(n < 511 ? n : 511);
++}
++static int g_top_pad = 0;   // lignes de l'XFB reservees a la console (128 si diag=1, sinon l'image occupe tout l'ecran)
++extern "C" void dkr_wii_draw_overlay(void* xfb, int width, int x, int y, const char* text);
++#define DEFAULT_FIFO_SIZE (256 * 1024)
++#endif
++
+ dkr::runtime::DiagnosticRenderer::DiagnosticRenderer() {
+     setup_result = ultramodern::renderer::SetupResult::Success;
+     chosen_api = ultramodern::renderer::GraphicsApi::Auto;
++
++#if defined(GEKKO)
++    if (g_wii_rmode != nullptr && g_gx_fifo == nullptr) {
++        g_diag_mode = static_cast<int>(dkr_wii_cfg("diag", 0.0F));
++        g_top_pad = g_diag_mode == 1 ? 128 : 0;
++        g_gx_fifo = MEM_K0_TO_K1(memalign(32, DEFAULT_FIFO_SIZE));
++        memset(g_gx_fifo, 0, DEFAULT_FIFO_SIZE);
++
++        GX_Init(g_gx_fifo, DEFAULT_FIFO_SIZE);
++
++        {   // Le jeu est en 4:3 : sur une console reglee en 16:9 l'image de 640 pixels est etiree par le televiseur ; on la limite aux 3/4 centraux.
++            const int aspect = static_cast<int>(dkr_wii_cfg("aspect", 0.0F));
++            g_pillarbox = aspect == 2 || (aspect == 0 && CONF_GetAspectRatio() == CONF_ASPECT_16_9);
++            g_view_w = g_pillarbox ? static_cast<u16>(g_wii_rmode->fbWidth * 3 / 4) & ~1U : g_wii_rmode->fbWidth;
++            g_view_x = static_cast<u16>((g_wii_rmode->fbWidth - g_view_w) / 2);
++        }
++        GXColor background = g_pillarbox ? GXColor{0x00, 0x00, 0x00, 0xFF} : GXColor{0x00, 0x1A, 0x33, 0xFF};
++        GX_SetCopyClear(background, 0x00FFFFFF);
++
++        GX_SetViewport(g_view_x, 0, g_view_w, g_wii_rmode->efbHeight - g_top_pad, 0, 1);
++        f32 yscale = GX_GetYScaleFactor(g_wii_rmode->efbHeight, g_wii_rmode->xfbHeight);
++        u32 xfbHeight = GX_SetDispCopyYScale(yscale);
++        GX_SetScissor(g_view_x, 0, g_view_w, g_wii_rmode->efbHeight - g_top_pad);
++        // Les 128 premières lignes de l'XFB sont réservées à la console de diagnostic
++        GX_SetDispCopySrc(0, 0, g_wii_rmode->fbWidth, g_wii_rmode->efbHeight - g_top_pad);
++        GX_SetDispCopyDst(g_wii_rmode->fbWidth, xfbHeight);
++        {   // cfg smooth : 0 = sans filtre vertical, 1 = filtre du mode video (defaut), 2 = filtre renforce
++            const int smooth = static_cast<int>(dkr_wii_cfg("smooth", 1.0F));
++            static u8 kOff[7] = {0, 0, 0, 63, 0, 0, 0};
++            static u8 kStrong[7] = {4, 8, 12, 16, 12, 8, 4};
++            // L'anticrenelage materiel GX (MSAA) exige GX_PF_RGB565_Z16 et une image de travail de 264 lignes : le Z16 ne suffit pas pour la plage
++            // de profondeur utilisee ici (z-fighting) ; l'option « Ameliore » n'active donc que les mipmaps et le filtrage anisotrope (wii_textures.inc).
++            GX_SetCopyFilter(g_wii_rmode->aa, g_wii_rmode->sample_pattern, GX_TRUE,
++                             smooth == 0 ? kOff : (smooth >= 2 ? kStrong : g_wii_rmode->vfilter));
++        }
++        GX_SetFieldMode(g_wii_rmode->field_rendering, ((g_wii_rmode->viHeight == 2 * g_wii_rmode->xfbHeight) ? GX_ENABLE : GX_DISABLE));
++
++        GX_SetCullMode(GX_CULL_NONE);
++        // (Pas de GX_CopyDisp ici : l'EFB n'est pas initialise apres GX_Init sur console reelle ; le copier dans l'XFB affichait du bruit
++        //  jusqu'au premier vrai dessin du jeu. L'XFB reste noir, efface au demarrage.)
++        GX_SetDispCopyGamma(GX_GM_1_0);
++
++        // Configuration minimale des sommets GX : Position (x,y,z) + Couleur (r,g,b,a)
++        GX_ClearVtxDesc();
++        GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
++        GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
++
++        GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
++        GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
++        GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR1, GX_CLR_RGBA, GX_RGBA8, 0); // brouillard : alpha = facteur par sommet
++        GX_SetChanCtrl(GX_COLOR1A1, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
++        GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
++
++        // Matrice de projection orthogonale directe sans dépendance à gu.o
++        Mtx44 proj;
++        std::memset(proj, 0, sizeof(proj));
++        proj[0][0] = 1.0F; // scale X
++        proj[1][1] = 1.0F; // scale Y
++        proj[2][2] = 1.0F; // z déjà en [-1, 0] (fourni par le décodeur)
++        proj[3][3] = 1.0F;
++        GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
++
++        Mtx modelview;
++        std::memset(modelview, 0, sizeof(modelview));
++        modelview[0][0] = 1.0F;
++        modelview[1][1] = 1.0F;
++        modelview[2][2] = 1.0F;
++        GX_LoadPosMtxImm(modelview, GX_PNMTX0);
++
++        GX_SetNumChans(1);
++        GX_SetNumTexGens(0);
++        GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
++        GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
++
++        GX_SetZCompLoc(GX_FALSE); // test Z après le test alpha : les texels transparents (feuillage) ne doivent pas écrire la profondeur
++        GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
++        GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
++
++        std::fprintf(stderr, "[boot][gfx] Wii ATI Hollywood 3D GX initialized\n");
++    }
++#endif
+ }
+ 
+ bool dkr::runtime::DiagnosticRenderer::valid() {
+@@ -24,16 +153,153 @@ bool dkr::runtime::DiagnosticRenderer::update_config(
+ 
+ void dkr::runtime::DiagnosticRenderer::enable_instant_present() {}
+ 
++#if defined(GEKKO)
++#include "wii_renderer_state.inc"
++#include "wii_renderer_cfg.inc"
++#include "wii_renderer_rdp_state.inc"
++#include "wii_textures.inc"
++
++#include "wii_renderer_debug.inc"
++#include "wii_renderer_geometry.inc"
++
++#include "wii_renderer_dlparse.inc"
++#endif
++
+ void dkr::runtime::DiagnosticRenderer::send_dl(const OSTask* task, std::uint8_t*) {
+     const auto index = ++display_list_count_;
+-    std::fprintf(stderr,
+-                 "[boot][gfx] display-list=%llu ucode=0x%08X data=0x%08X size=%u\n",
+-                 static_cast<unsigned long long>(index), task->t.ucode,
+-                 task->t.data_ptr, task->t.data_size);
++    if (index <= 5 || index % 120 == 0) {
++        std::fprintf(stderr,
++                     "[boot][gfx] display-list=%llu ucode=0x%08X data=0x%08X size=%u\n",
++                     static_cast<unsigned long long>(index), task->t.ucode,
++                     task->t.data_ptr, task->t.data_size);
++    }
++
++#if defined(GEKKO)
++    if (rdram_ == nullptr || task->t.data_ptr == 0) return;
++    LoadRenderCfg();
++    g_dl_processed++;
++    if (g_cfg_skip > 0 && (g_dl_processed % (static_cast<u32>(g_cfg_skip) + 1U)) != 0) return; // saute le dessin (option skip=N)
++
++    // Décodage des commandes Display List F3DDKR
++    const u32 dl_offset = task->t.data_ptr & 0x00FFFFFF;
++    const u32* cmd_ptr = reinterpret_cast<const u32*>(rdram_ + dl_offset);
++    // data_size est un nombre de commandes Gfx (gfxtask_run_xbus : dlEnd - dlBegin) ou un nombre d'octets selon la variante
++    // de tâche ; dans les deux cas c'est une borne sûre, la liste se termine de toute façon par G_ENDDL.
++    const u32 cmd_count = task->t.data_size;
++
++    auto reset_state = [&]() {
++        g_dl_budget = 50000;
++        g_dl_budget_exhausted = 0;
++        g_dl_depth_exceeded = 0;
++        g_dmadl_count = 0;
++        g_dmadl_max_count = 0;
++        g_dmadl_rejected = 0;
++        g_gdl_rejected = 0;
++        g_last_bad_gdl_w1 = 0;
++        g_last_bad_dmadl_w1 = 0;
++        g_cur_mvp = 0;
++        g_billboard = false;
++        g_vtx_count = 0;
++        g_to_depth = false;
++        g_dl_opcode_count = 0;
++        g_dl_opcode_next = 0;
++        g_seq_n = 0; g_seq[0] = 0;
++        g_root_n = 0;
++        g_combine_freq_n = 0;
++        g_prim_color = 0;
++        g_env_color = 0;
++        g_last_combine_w0 = 0;
++        g_last_combine_w1 = 0;
++        g_sd_stage = 1;
++
++    };
++    if (g_cfg_abtest && g_cfg_fbdump > 0 && static_cast<int>(g_dl_processed) >= g_cfg_fbstart && (g_dl_processed % static_cast<u32>(g_cfg_fbdump)) == 0 && g_fbdump_n + 2U <= 20U) {
++        // Comparatif A/B : la meme display list est dessinee deux fois, d'abord en mode strict (copie vers g_ab_xfb), puis en mode ameliore
++        const bool saved = g_cfg_enhanced, saved_fog = g_cfg_fog, saved_w2 = g_cfg_water2;
++        const bool ab_water = dkr_wii_cfg("abwater", 0.0F) != 0.0F; // cfg abwater=1 : A/B sur la 2e texture de l'eau (A ancien, B nouveau)
++        const bool ab_fog = dkr_wii_cfg("abfog", 0.0F) != 0.0F; // cfg abfog=1 : le comparatif A/B porte sur le brouillard (A sans, B avec) au lieu du mode ameliore
++        if (g_ab_xfb == nullptr) g_ab_xfb = MEM_K0_TO_K1(memalign(32, static_cast<size_t>(g_wii_rmode->fbWidth) * g_wii_rmode->xfbHeight * VI_DISPLAY_PIX_SZ));
++        if (g_ab_xfb != nullptr) {
++            if (ab_water) g_cfg_water2 = false; else if (ab_fog) g_cfg_fog = false; else g_cfg_enhanced = false;
++            reset_state();
++            ParseN64DisplayList(cmd_ptr, cmd_count, rdram_, 0);
++            GX_SetDrawDone();
++            GX_CopyDisp(static_cast<u8*>(g_ab_xfb) + g_top_pad * g_wii_rmode->fbWidth * VI_DISPLAY_PIX_SZ, GX_TRUE); // efface l'EFB et le Z pour le 2e dessin
++            GX_Flush();
++            GX_DrawDone();
++            g_cfg_enhanced = saved;
++            g_cfg_fog = saved_fog;
++            g_cfg_water2 = saved_w2;
++            g_ab_pending = true;
++            g_ab_tag = g_dl_processed;
++        }
++    }
++    if (g_cfg_abmulti && g_abm_req && g_fbdump_n + kAbmVariants + 1U <= 24U) {
++        g_abm_req = false;
++        ++g_abm_ndone;
++        const bool s_sub = g_cfg_subdiv, s_edge = g_edge_subdiv;
++        const int s_cull = g_cfg_cull;
++        const f32 s_nearw = g_near_w, s_guard = g_guard_band, s_bias = g_decal_bias;
++        for (u32 v = 0; v < kAbmVariants; ++v) {
++            if (g_abm_xfb[v] == nullptr) g_abm_xfb[v] = MEM_K0_TO_K1(memalign(32, static_cast<size_t>(g_wii_rmode->fbWidth) * g_wii_rmode->xfbHeight * VI_DISPLAY_PIX_SZ));
++            if (g_abm_xfb[v] == nullptr) continue;
++            switch (v) {
++                case 0: g_zw_k = 500.0F; break;
++                case 1: g_zw_k = 3000.0F; break;
++                case 2: g_blend_zw = true; break;
++                case 3: g_cfg_cull = 0; break;
++                case 4: g_cfg_subdiv = false; break;
++                case 5: g_force_noz = true; break;
++                default: g_zw_k = 500.0F; g_blend_zw = true; break;
++            }
++            reset_state();
++            ParseN64DisplayList(cmd_ptr, cmd_count, rdram_, 0);
++            GX_SetDrawDone();
++            GX_CopyDisp(static_cast<u8*>(g_abm_xfb[v]) + g_top_pad * g_wii_rmode->fbWidth * VI_DISPLAY_PIX_SZ, GX_TRUE);
++            GX_Flush();
++            GX_DrawDone();
++            g_cfg_subdiv = s_sub; g_edge_subdiv = s_edge; g_cfg_cull = s_cull; g_near_w = s_nearw; g_guard_band = s_guard; g_decal_bias = s_bias; g_force_noz = false; g_zw_k = 0.0F; g_blend_zw = false;
++        }
++        g_abm_pending = true;
++        g_abm_tag = g_dl_processed;
++    }
++    reset_state();
++    const u64 prof_t0 = gettime();
++    ParseN64DisplayList(cmd_ptr, cmd_count, rdram_, 0);
++    const u64 parse_dt = gettime() - prof_t0;
++    g_prof_parse += parse_dt;
++    g_last_frame_ticks = parse_dt;
++    g_sd_stage = 2;
++    g_frame_dirty = true;
++#endif
+ }
+ 
++#if defined(GEKKO)
++#include "wii_renderer_profile.inc"
++#endif
++
+ void dkr::runtime::DiagnosticRenderer::update_screen() {
+     const auto index = ++present_count_;
++    LoadRenderCfg();
++    g_us_stage = 1;
++#if defined(GEKKO)
++    // Tous les services de debug (mesure d'inactivite, echantillonneur de threads, journal et commandes reseau, chien de garde, releve de profil) ne tournent
++    // que si le panneau de debug est actif (lanceur : Debug = Console ou Overlay, cfg diag != 0). Debug sur Arret : le jeu garde toutes les ressources.
++    if (g_diag_mode != 0) {
++    StartIdleThread();
++    StartThreadSampler();
++    dkr_netlog_start();
++#if defined(DKR_PROFILE_FUNCS)
++    dkr_funcprof_start();
++#endif
++    g_wd_rdram = rdram_;
++    StartWatchdog();
++    } // g_diag_mode != 0
++    g_hb_present = static_cast<unsigned>(index);
++    g_hb_dl = g_dl_processed;
++    if (rdram_ != nullptr) { s32 mid = 0; std::memcpy(&mid, rdram_ + (dkr::runtime::revision_addresses::CurrentMenuId & 0x007FFFFFU), sizeof(mid)); g_hb_menu = mid; }
++#endif
++    const u64 prof_upd0 = gettime();
+     if (index == 1) {
+         // The first screen update is queued only after ultramodern's VI thread
+         // has installed and committed its safe dummy VI mode. Starting DKR here
+@@ -41,10 +307,282 @@ void dkr::runtime::DiagnosticRenderer::update_screen() {
+         std::fprintf(stderr, "[boot] VI initialized; starting recompiled DKR entrypoint\n");
+         recomp::start_game(kGameId);
+     }
++
+     if (index <= 10 || index % 60 == 0) {
+-        std::fprintf(stderr, "[boot][vi] present=%llu\n",
+-                     static_cast<unsigned long long>(index));
++        std::fprintf(stderr, "[boot][vi] present=%llu dl=%u tri=%u rect=%u\n",
++                     static_cast<unsigned long long>(index), g_dl_processed,
++                     g_triangles_rendered, g_rects_rendered);
++    }
++#if defined(GEKKO)
++    // update_screen est appelé à 60 Hz mais les display lists arrivent à ~30 Hz : ne copier (et donc effacer
++    // l'EFB) que si une nouvelle image a été dessinée, sinon on affiche une image vide une fois sur deux.
++    if (g_wii_xfb != nullptr && g_wii_rmode != nullptr && g_frame_dirty) {
++        g_frame_dirty = false;
++        // (Les carrés de couleur de l'ancien diagnostic ont été retirés : la console texte les remplace.)
++
++        if (g_shot_req != 0) {
++            const int color = g_shot_req == 2;
++            g_shot_req = 0;
++            static u8* zbuf = nullptr;
++            const u16 step = color ? 2 : 4;
++            const u16 zw = static_cast<u16>(g_view_w / step), zh = static_cast<u16>((g_wii_rmode->efbHeight - g_top_pad) / step);
++            if (zbuf == nullptr) zbuf = static_cast<u8*>(std::malloc(static_cast<size_t>(240) * 240 * 3U));
++            if (zbuf != nullptr && static_cast<size_t>(zw) * zh <= 240U * 240U) {
++                GX_DrawDone();
++                u8* o = zbuf;
++                for (u16 y = 0; y < zh; ++y) {
++                    for (u16 x = 0; x < zw; ++x) {
++                        const u16 px = static_cast<u16>(g_view_x + x * step), py = static_cast<u16>(y * step);
++                        if (color) {
++                            GXColor c;
++                            GX_PeekARGB(px, py, &c);
++                            *o++ = c.r; *o++ = c.g; *o++ = c.b;
++                        } else {
++                            u32 z = 0;
++                            GX_PeekZ(px, py, &z);
++                            *o++ = static_cast<u8>(z >> 16); *o++ = static_cast<u8>(z >> 8); *o++ = static_cast<u8>(z);
++                        }
++                    }
++                }
++                if (dkr_shot_submit(zbuf, zw, zh, color) == 0) DbgLog("shot: envoi precedent en cours");
++            }
++        }
++        g_us_stage = 3;
++        GX_SetDrawDone();
++        GX_CopyDisp(static_cast<u8*>(g_wii_xfb) + g_top_pad * g_wii_rmode->fbWidth * VI_DISPLAY_PIX_SZ, g_pillarbox ? GX_TRUE : GX_FALSE); // bandes : efface l'EFB (noir)
++        GX_Flush();
++        g_us_stage = 4;
++
++        // Diagnostic texte : la console écrit directement dans le XFB, il faut donc
++        // attendre la fin de la copie EFB->XFB puis réécrire le texte à chaque frame.
++        { const u64 t0 = gettime(); GX_DrawDone(); g_prof_drawdone += gettime() - t0; }
++        g_us_stage = 5;
++        if (g_diag_mode == 2) { // overlay : FPS de jeu (display lists) et d'image video, mesures sur ~1 s
++            static u64 ov_t = 0;
++            static u32 ov_dl = 0;
++            static unsigned long long ov_vi = 0;
++            static char ov_text[48] = "";
++            const u64 now_ov = gettime();
++            if (ov_t == 0) { ov_t = now_ov; ov_dl = g_dl_processed; ov_vi = index; }
++            const u64 el_us = ticks_to_microsecs(now_ov - ov_t);
++            if (el_us >= 1000000ULL) {
++                const f32 s = static_cast<f32>(el_us) / 1.0e6F;
++                std::snprintf(ov_text, sizeof(ov_text), "%d FPS (%d)", static_cast<int>(static_cast<f32>(g_dl_processed - ov_dl) / s + 0.5F),
++                              static_cast<int>(static_cast<f32>(index - ov_vi) / s + 0.5F));
++                ov_t = now_ov; ov_dl = g_dl_processed; ov_vi = index;
++            }
++            if (ov_text[0] != 0) dkr_wii_draw_overlay(g_wii_xfb, static_cast<int>(g_wii_rmode->fbWidth), 12, 10, ov_text);
++        }
++        if (g_cfg_ring || g_cfg_abmulti) { // L + R + Start (manette GameCube 1) : ecrit ring.txt / debug.txt une fois par appui
++            static bool ring_prev = false;
++            const u16 held = PAD_ButtonsHeld(0);
++            const bool combo = (held & PAD_TRIGGER_L) && (held & PAD_TRIGGER_R) && ((held & PAD_BUTTON_START) || g_cfg_abmulti); // abmulti : L+R suffit (Entree = HOME de la Wiimote emulee = quitter)
++            if (combo && !ring_prev) { dkr_dump_flush(); if (g_cfg_abmulti) g_abm_req = true; } // abmulti : L+R+Start declenche aussi le comparatif multi-variantes
++            ring_prev = combo;
++        }
++        bool force_fb = false;
++        if (g_ringred_pending) { g_ringred_pending = false; dkr_dump_flush(); }
++        if (g_cfg_ringred && !g_ringred_done && index > 4000) { // diagnostic (Dolphin) : declenche l'export quand des pixels rouges satures apparaissent (traces de pneus)
++            const u32* px = static_cast<const u32*>(g_wii_xfb) + static_cast<size_t>(g_top_pad) * (g_wii_rmode->fbWidth / 2);
++            u32 red = 0;
++            const u32 rows = g_wii_rmode->xfbHeight - g_top_pad, half = g_wii_rmode->fbWidth / 2;
++            for (u32 y = rows * 55 / 100; y < rows; y += 2) { // bas de l'image seulement (le logo du titre est rouge)
++                for (u32 x = 0; x < half; x += 2) {
++                    const u32 w = px[static_cast<size_t>(y) * half + x];
++                    if (((w >> 24) & 255) < 140 && (w & 255) > 190 && ((w >> 16) & 255) < 120) ++red;
++                }
++            }
++            if (red > static_cast<u32>(g_cfg_ringred) && index >= g_ringred_next) { g_ringred_next = static_cast<u32>(index) + 90; std::snprintf(g_ring_name, sizeof(g_ring_name), "sd:/apps/DKR-R/ring%u.txt", g_ringred_n); ++g_ringred_n; if (g_ringred_n >= 14) g_ringred_done = true; force_fb = true; DbgLog("RINGRED index=%llu red=%u\n", static_cast<unsigned long long>(index), red); g_ringred_pending = true; }
++        }
++        if (g_cfg_dumpflush > 0 && static_cast<int>(index) >= g_cfg_dumpflush) { g_cfg_dumpflush = 0; dkr_dump_flush(); }
++        if (g_abm_pending) { // comparatif multi-variantes : image normale (indice 0) puis les variantes 1..7, ecrites tout de suite sur la SD
++            g_abm_pending = false;
++            ++g_abm_ndump;
++            g_dump_fb_pos = 0; g_fbdump_n = 0; // on ne garde que la derniere capture (le kart attend devant la dalle)
++            DumpXfbToBuf(static_cast<const u8*>(g_wii_xfb), g_abm_tag * 16U);
++            for (u32 v = 0; v < kAbmVariants; ++v) if (g_abm_xfb[v] != nullptr) DumpXfbToBuf(static_cast<const u8*>(g_abm_xfb[v]), g_abm_tag * 16U + 1U + v);
++            dkr_dump_flush();
++        }
++        if (g_cfg_abmulti) { // capture automatique toutes les ~4 s (compteur de passages : ce bloc ne tourne que sur les images dessinees, pas a chaque vsync)
++            static u32 abm_n = 0;
++            ++g_abm_npass;
++            if (index > 600 && (++abm_n % 120U) == 0U) g_abm_req = true;
++        }
++        if (g_cfg_abmulti && (index % 20U) == 0U) { // declencheur : la presence du fichier abgo.txt demande une capture
++            if (FILE* gf = std::fopen("sd:/apps/DKR-R/abgo.txt", "r")) { std::fclose(gf); std::remove("sd:/apps/DKR-R/abgo.txt"); g_abm_req = true; }
++        }
++        if (g_ab_pending && g_ab_xfb != nullptr) { // comparatif A/B : image « avant » (mode N64 strict) puis image « apres » (mode ameliore), meme display list
++            g_ab_pending = false;
++            DumpXfbToBuf(static_cast<const u8*>(g_ab_xfb), g_ab_tag * 2U);
++            DumpXfbToBuf(static_cast<const u8*>(g_wii_xfb), g_ab_tag * 2U + 1U);
++        } else if (g_cfg_fbdump > 0 && !g_cfg_abtest && static_cast<int>(index) >= g_cfg_fbstart && ((index % static_cast<u32>(g_cfg_fbdump)) == 0 || force_fb)) {
++            DumpXfbToBuf(static_cast<const u8*>(g_wii_xfb), static_cast<u32>(index));
++        }
++        static u32 diag_counter = 0;
++        const bool do_diag = g_cfg_diag && (diag_counter++ % 20U) == 0U;
++        if (do_diag) {
++        // Sauvegarde le curseur (les logs stderr continuent plus bas), écrit le diagnostic en haut
++        {
++            static bool log_cursor_placed = false;
++            if (!log_cursor_placed) {
++                log_cursor_placed = true;
++                DiagPrint("\x1b[16;0H");
++            }
++        }
++        {
++            char tr[16 * 4 + 1];
++            int n = 0;
++            for (u32 k = 0; k < 16; ++k) {
++                const u32 e = g_trace_ring[(g_trace_idx + k) & 15];
++                if (e == 0) continue;
++                n += std::snprintf(tr + n, sizeof(tr) - n, "%c%u ", static_cast<char>(e >> 8), e & 0xFF);
++            }
++            tr[n] = 0;
++            // 5 opcodes de display list les plus fréquents (opcode:nombre)
++            u32 top[5] = {};
++            u32 used[5] = {};
++            int nt = 0;
++            for (int k = 0; k < 5; ++k) {
++                u32 best = 0, bi = 0;
++                for (u32 o = 0; o < 256; ++o) {
++                    bool taken = false;
++                    for (int j = 0; j < nt; ++j) if (used[j] == o) taken = true;
++                    if (!taken && g_op_hist[o] > best) { best = g_op_hist[o]; bi = o; }
++                }
++                if (best == 0) break;
++                used[nt] = bi; top[nt] = best; ++nt;
++            }
++            u32 menu_id = 0xFFFFFFFFU;
++            if (rdram_ != nullptr) {
++                std::memcpy(&menu_id, rdram_ + (dkr::runtime::revision_addresses::CurrentMenuId & 0x007FFFFFU), sizeof(menu_id));
++            }
++            // Variables de l'écran-titre (US v77, voir extern/dkr-decomp/build/dkr.us.v77.map)
++            auto rd32 = [&](u32 addr) -> s32 {
++                s32 v = 0;
++                if (rdram_ != nullptr) std::memcpy(&v, rdram_ + (addr & 0x007FFFFFU), sizeof(v));
++                return v;
++            };
++            const s32 reveal = rd32(0x8012686C), demo_idx = rd32(0x80126864), demo_timer = rd32(0x80126868);
++            const s32 menu_delay = rd32(0x800DF47C);
++            auto rd8 = [&](u32 addr) -> int { return rdram_ != nullptr ? static_cast<int>(static_cast<s8>(rdram_[addr & 0x007FFFFFU])) : 0; };
++            const int cut_cur = rd8(0x8011AD21), cut_f0 = rd8(0x8011AD22), cut_f1 = rd8(0x8011AD23);
++            f32 cine_time = 0.0F;
++            if (rdram_ != nullptr) std::memcpy(&cine_time, rdram_ + (0x801268D8U & 0x007FFFFFU), sizeof(cine_time));
++            const s32 open_name = rd32(0x801268E0);
++            u32 menu_assets = 0;
++            for (u32 a = 0; a < 128; ++a) { if (rd32(0x80126550U + a * 4U) != 0) ++menu_assets; }
++            char root_hex[72];
++            {
++                const u32 n = g_root_n < 32 ? g_root_n : 32;
++                for (u32 q = 0; q < n; ++q) {
++                    std::snprintf(root_hex + q * 2, sizeof(root_hex) - q * 2, "%02X", g_root_ops[(g_root_n - n + q) & 63]);
++                }
++                root_hex[n * 2] = 0;
++            }
++            char ob[96];
++            int on = std::snprintf(ob, sizeof(ob), "ops");
++            for (int k = 0; k < nt; ++k) {
++                on += std::snprintf(ob + on, sizeof(ob) - on, " %02X:%u", used[k], top[k]);
++            }
++            char cc[112];
++            int cn = 0;
++            u32 cc0 = 0, cc1 = 0;
++            for (u32 k = 1; k < g_combine_freq_n; ++k) {
++                if (g_combine_freq[k].count > g_combine_freq[cc0].count) cc0 = k;
++            }
++            if (g_combine_freq_n != 0) {
++                cn += std::snprintf(cc + cn, sizeof(cc) - cn, "FC%06X:%08X*%u",
++                                    g_combine_freq[cc0].w0 & 0x00FFFFFFU, g_combine_freq[cc0].w1,
++                                    g_combine_freq[cc0].count);
++                cn += std::snprintf(cc + cn, sizeof(cc) - cn, " P%08X E%08X",
++                                    g_combine_freq[cc0].prim, g_combine_freq[cc0].env);
++            }
++            for (u32 k = 0; k < g_combine_freq_n; ++k) {
++                if (k != cc0 && (cc1 == cc0 || g_combine_freq[k].count > g_combine_freq[cc1].count)) cc1 = k;
++            }
++            if (g_combine_freq_n > 1) {
++                cn += std::snprintf(cc + cn, sizeof(cc) - cn, " FC%08X:%08Xx%u",
++                                    g_combine_freq[cc1].w0, g_combine_freq[cc1].w1,
++                                    g_combine_freq[cc1].count);
++            }
++            char bind_log[128];
++            {
++                size_t bl = 0;
++                for (u32 q = 0; q < 6 && q < g_bind_n; ++q) bl += std::snprintf(bind_log + bl, sizeof(bind_log) - bl, "%s ", g_bind_ring[(g_bind_n - 1 - q) % 6]);
++                bind_log[bl] = 0;
++            }
++            char dlop[24 * 2 + 1];
++            for (u32 k = 0; k < g_dl_opcode_count; ++k) {
++                const u32 slot = (g_dl_opcode_next + 24 - g_dl_opcode_count + k) % 24;
++                std::snprintf(dlop + k * 2, sizeof(dlop) - k * 2, "%02X", g_dl_opcodes[slot]);
++            }
++            dlop[g_dl_opcode_count * 2] = 0;
++            // Sauvegarde le curseur (les logs stderr continuent plus bas), écrit le diagnostic en haut
++            static bool log_cursor_placed = false;
++            if (!log_cursor_placed) {
++                log_cursor_placed = true;
++                DiagPrint("\x1b[7;0H");
++            }
++            DiagPrint("\x1b[s\x1b[1;0H"
++                      "f%llu dl%u tri%u rect%u skip%u E4:%u E5:%u\n"
++                      "menu=%d rev=%d di=%d dt=%d ast=%u md=%d\n"
++                      "cc %s\n"
++                      "tex %s\n"
++                      "seq %s\n\x1b[u",
++                      static_cast<unsigned long long>(index), g_dl_processed, g_triangles_rendered,
++                      g_rects_rendered, g_rects_skipped, g_op_hist[0xE4], g_op_hist[0xE5],
++                      static_cast<int>(menu_id), reveal, demo_idx, demo_timer, menu_assets, menu_delay,
++                      cc,
++                      bind_log,
++                      g_seq);
++        }
++        if (index % 60 == 0) {
++            std::fprintf(stderr,
++                         "[diag] step=%u thr=%u/%u/%u last_id=%u recv=%u stage=%u loops=%u "
++                         "send=%u ext=%u vi_set=%u vi_enq=%u sp=%u gfx=%u\n",
++                         g_entrypoint_step, g_threads_created, g_threads_started,
++                         g_thread_func_entered, g_thread_last_id_started,
++                         g_recv_mesg_calls, g_recv_stage, g_do_recv_loops,
++                         g_send_mesg_calls, g_external_messages_dequeued,
++                         g_vi_set_event_calls, g_vi_events_enqueued,
++                         g_sp_calls, g_sp_gfx_tasks);
++            // Même diagnostic dans un fichier de la SD (relu depuis l'hôte, Dolphin synchronise le dossier SD à l'arrêt)
++            if (FILE* f = std::fopen("sd:/dkr-diag.txt", "w")) {
++                const u8* r = rdram_;
++                std::fprintf(f,
++                             "frame=%llu step=%u hit=%u\n"
++                             "thr created=%u started=%u entered=%u last_id=%u\n"
++                             "recv calls=%u stage=%u loops=%u send=%u ext=%u vi_set=%u vi_enq=%u\n"
++                             "sp calls=%u gfx=%u aud=%u dl=%u tri=%u rect=%u\n"
++                             "thrdbg spawn=%u init=%u woke=%u mism=%u ret=%u term=%u resume=%u\n"
++                             "rdram=%p b318=%02X %02X %02X %02X b400=%02X %02X %02X %02X\n",
++                             static_cast<unsigned long long>(index), g_entrypoint_step, g_entrypoint_hit,
++                             g_threads_created, g_threads_started, g_thread_func_entered, g_thread_last_id_started,
++                             g_recv_mesg_calls, g_recv_stage, g_do_recv_loops, g_send_mesg_calls,
++                             g_external_messages_dequeued, g_vi_set_event_calls, g_vi_events_enqueued,
++                             g_sp_calls, g_sp_gfx_tasks, g_sp_aud_tasks, g_dl_processed,
++                             g_triangles_rendered, g_rects_rendered,
++                             g_thr_dbg[0], g_thr_dbg[1], g_thr_dbg[2], g_thr_dbg[3], g_thr_dbg[4],
++                             g_thr_dbg[5], g_thr_dbg[6],
++                             static_cast<const void*>(r),
++                             r ? r[0x318] : 0, r ? r[0x319] : 0, r ? r[0x31A] : 0, r ? r[0x31B] : 0,
++                             r ? r[0x400] : 0, r ? r[0x401] : 0, r ? r[0x402] : 0, r ? r[0x403] : 0);
++                std::fclose(f);
++            }
++        }
++        }
++    } else if (g_cfg_diag && g_wii_xfb != nullptr && g_wii_rmode != nullptr && (index % 15) == 0) {
++        // Aucune nouvelle display list depuis la dernière copie : signaler l'inactivité (périodes noires)
++        DiagPrint("\x1b[s\x1b[7;0HIDLE f%llu dl%u dma%u/%uKB rcv%u snd%u      \n\x1b[u",
++                  static_cast<unsigned long long>(index), g_dl_processed, g_pi_dma_calls, g_pi_dma_kb,
++                  g_recv_mesg_calls / 2, g_send_mesg_calls / 2);
+     }
++    g_us_stage = 7;
++    { const u64 t0 = gettime(); VIDEO_WaitVSync(); g_prof_vsync += gettime() - t0; }
++    g_us_stage = 8;
++    g_prof_update += gettime() - prof_upd0;
++    if (g_cfg_prof && (index % 120) == 0) WriteProfileReport(index, rdram_);
++#endif
+ }
+ 
+ void dkr::runtime::DiagnosticRenderer::shutdown() {}
+@@ -58,6 +596,8 @@ float dkr::runtime::DiagnosticRenderer::get_resolution_scale() const {
+ }
+ 
+ std::unique_ptr<ultramodern::renderer::RendererContext> dkr::runtime::CreateDiagnosticRenderer(
+-    std::uint8_t*, ultramodern::renderer::WindowHandle, bool) {
+-    return std::make_unique<DiagnosticRenderer>();
++    std::uint8_t* rdram, ultramodern::renderer::WindowHandle, bool) {
++    auto renderer = std::make_unique<DiagnosticRenderer>();
++    renderer->rdram_ = rdram;
++    return renderer;
+ }
+diff --git a/runtime-recomp/src/game/null_renderer.hpp b/runtime-recomp/src/game/null_renderer.hpp
+index 3bfeb82..0416da3 100644
+--- a/runtime-recomp/src/game/null_renderer.hpp
++++ b/runtime-recomp/src/game/null_renderer.hpp
+@@ -24,6 +24,9 @@ public:
+ private:
+     std::atomic<std::uint64_t> display_list_count_{0};
+     std::atomic<std::uint64_t> present_count_{0};
++    std::uint8_t* rdram_ = nullptr;
++    friend std::unique_ptr<ultramodern::renderer::RendererContext> CreateDiagnosticRenderer(
++        std::uint8_t*, ultramodern::renderer::WindowHandle, bool);
+ };
+ 
+ std::unique_ptr<ultramodern::renderer::RendererContext> CreateDiagnosticRenderer(
+diff --git a/runtime-recomp/src/game/presentation_identity.cpp b/runtime-recomp/src/game/presentation_identity.cpp
+index 2c798e4..0fa37da 100644
+--- a/runtime-recomp/src/game/presentation_identity.cpp
++++ b/runtime-recomp/src/game/presentation_identity.cpp
+@@ -1186,6 +1186,11 @@ extern "C" void dkr_presentation_scene_begin(std::uint8_t*, recomp_context*) {
+ 
+ extern "C" void dkr_presentation_frame_begin(std::uint8_t* rdram,
+                                               recomp_context*) {
++#if defined(GEKKO)
++    // Presentation interpolation/HUD layout are PC enhancements; skipped on Wii for now.
++    (void)rdram;
++    return;
++#endif
+     dkr::runtime::hud::begin_authored_frame(rdram);
+     dkr::runtime::presentation::postrace_presentation_begin_frame();
+     const std::uint64_t frame =
+diff --git a/runtime-recomp/src/game/runtime_enhancements.cpp b/runtime-recomp/src/game/runtime_enhancements.cpp
+index 87375af..8125140 100644
+--- a/runtime-recomp/src/game/runtime_enhancements.cpp
++++ b/runtime-recomp/src/game/runtime_enhancements.cpp
+@@ -9,7 +9,9 @@
+ 
+ #include "recomp.h"
+ 
++#ifndef GEKKO
+ #include <SDL.h>
++#endif
+ 
+ #include <array>
+ #include <atomic>
+@@ -599,6 +601,10 @@ extern "C" void dkr_keep_hub_segment_visible(std::uint8_t* rdram,
+ 
+ extern "C" void dkr_extended_frustum_begin(std::uint8_t* rdram,
+                                             recomp_context*) {
++#if defined(GEKKO)
++    (void)rdram;
++    return; // Wii : pas d'extension de frustum (les constantes du jeu restent intactes)
++#endif
+     // Defensive recovery for an interrupted/nested scope. DKR normally calls
+     // this serially once per viewport, but never leave the authored table in a
+     // widened state if a host-side exception or future call-site changes that.
+@@ -611,17 +617,19 @@ extern "C" void dkr_extended_frustum_begin(std::uint8_t* rdram,
+         g_frustum_scope.active = false;
+     }
+ 
++    int width = 640;
++    int height = 480;
++#if !defined(GEKKO)
+     auto* window = static_cast<SDL_Window*>(
+         dkr::runtime::platform::sdl_window());
+     if (window == nullptr) {
+         return;
+     }
+-    int width = 0;
+-    int height = 0;
+     SDL_GetWindowSize(window, &width, &height);
+     if (width <= 0 || height <= 0) {
+         return;
+     }
++#endif
+     const int layout = static_cast<std::int32_t>(
+         MEM_W(0, RdramAddress(kViewportLayoutAddress)));
+     float scale = dkr::runtime::enhancements::frustum_horizontal_scale(
+@@ -659,6 +667,10 @@ extern "C" void dkr_extended_frustum_begin(std::uint8_t* rdram,
+ 
+ extern "C" void dkr_extended_frustum_end(std::uint8_t* rdram,
+                                           recomp_context*) {
++#if defined(GEKKO)
++    (void)rdram;
++    return;
++#endif
+     if (!g_frustum_scope.active) {
+         return;
+     }
+diff --git a/runtime-recomp/src/game/runtime_platform.cpp b/runtime-recomp/src/game/runtime_platform.cpp
+index 58fdffe..5df07b0 100644
+--- a/runtime-recomp/src/game/runtime_platform.cpp
++++ b/runtime-recomp/src/game/runtime_platform.cpp
+@@ -1,3 +1,6 @@
++#if defined(GEKKO)
++extern "C" bool dkr_wii_launcher_inited();
++#endif
+ #include "runtime_platform.hpp"
+ #include "audio_equalizer.hpp"
+ #include "controller_snapshot.hpp"
+@@ -23,6 +26,13 @@
+ #endif
+ #endif
+ 
++#if defined(GEKKO)
++#include <ogc/pad.h>
++#include <wiiuse/wpad.h>
++#include <asndlib.h>
++#include <ogc/lwp_watchdog.h>
++#endif
++
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
+@@ -75,6 +85,7 @@ std::atomic<dkr::runtime::platform::InputBackend> g_active_input_backend{
+     dkr::runtime::platform::InputBackend::SDL2Compatibility};
+ std::atomic<bool> g_input_backend_switch_pending{false};
+ std::atomic<bool> g_input_backend_switch_in_progress{false};
++std::uint32_t g_audio_frequency = 0;
+ 
+ #if DKR_RUNTIME_HAS_RT64
+ std::mutex g_platform_mutex;
+@@ -136,7 +147,6 @@ struct ControllerMappingSession {
+ };
+ ControllerMappingSession g_mapping_session;
+ SDL_Window* g_window = nullptr;
+-std::uint32_t g_audio_frequency = 0;
+ std::vector<std::int16_t> g_audio_swap_buffer;
+ dkr::runtime::audio::StereoEqualizer g_audio_equalizer;
+ std::uint32_t g_audio_callback_frames = 0;
+@@ -1416,6 +1426,18 @@ bool dkr::runtime::platform::initialise() {
+         std::fprintf(stderr, "[boot][input] %s\n",
+                      g_input_backend_detail.c_str());
+     }
++#endif
++#if defined(GEKKO)
++    if (!dkr_wii_launcher_inited()) { // sinon deja initialises par l'ecran de lancement
++        PAD_Init();
++        WPAD_Init();
++    }
++    ASND_Init();
++    ASND_Pause(0); // 0 = reprise : la voix peut jouer
++    std::fprintf(stderr, "[boot][input] Wii controls initialized: GameCube Pad & Wiimote/Nunchuk/Classic\n");
++    std::fprintf(stderr, "[boot][audio] Wii hardware audio ASND initialized\n");
++    std::printf("[boot][input] Wii controls initialized: GameCube Pad & Wiimote/Nunchuk/Classic\n");
++    std::printf("[boot][audio] Wii hardware audio ASND initialized\n");
+ #endif
+     std::fprintf(stderr,
+                  "[boot][input] keyboard: WASD=stick arrows=d-pad Space=A Shift=B "
+@@ -1864,6 +1886,53 @@ void dkr::runtime::platform::update_ui_gamepad_navigation() {
+ 
+ #endif
+ 
++#if defined(GEKKO)
++namespace {
++// File d'attente audio : le jeu produit des blocs stéréo 16 bits (big-endian, comme ASND) ; la voix ASND les consomme par
++// morceaux de kWiiChunkFrames via son callback (appelé dans le thread ASND). Indices monotones en trames stéréo.
++constexpr u32 kWiiRingFrames = 16384; // puissance de 2
++constexpr u32 kWiiChunkFrames = 512;
++alignas(32) s16 g_wii_ring[kWiiRingFrames * 2];
++alignas(32) u8 g_wii_chunk[2][kWiiChunkFrames * 4];
++std::atomic<u32> g_wii_ring_r{0};
++std::atomic<u32> g_wii_ring_w{0};
++std::atomic<u32> g_wii_underruns{0};
++volatile u32 g_wii_chunk_idx = 0;
++bool g_wii_voice_started = false;
++
++void WiiFillChunk(u8* dst) {
++    const u32 r = g_wii_ring_r.load(std::memory_order_acquire);
++    const u32 w = g_wii_ring_w.load(std::memory_order_acquire);
++    const u32 avail = w - r;
++    const u32 n = avail < kWiiChunkFrames ? avail : kWiiChunkFrames;
++    s16* out = reinterpret_cast<s16*>(dst);
++    for (u32 i = 0; i < n; ++i) {
++        const u32 src = ((r + i) & (kWiiRingFrames - 1)) * 2;
++        out[i * 2] = g_wii_ring[src];
++        out[i * 2 + 1] = g_wii_ring[src + 1];
++    }
++    for (u32 i = n * 2; i < kWiiChunkFrames * 2; ++i) out[i] = 0;
++    if (n < kWiiChunkFrames) g_wii_underruns.fetch_add(1, std::memory_order_relaxed);
++    g_wii_ring_r.store(r + n, std::memory_order_release);
++    DCFlushRange(dst, kWiiChunkFrames * 4);
++}
++
++void WiiVoiceCallback(s32 voice) {
++    u8* buf = g_wii_chunk[g_wii_chunk_idx ^= 1];
++    WiiFillChunk(buf);
++    ASND_AddVoice(voice, buf, kWiiChunkFrames * 4);
++}
++
++void WiiStartVoice(u32 frequency) {
++    g_wii_voice_started = true;
++    u8* buf = g_wii_chunk[0];
++    g_wii_chunk_idx = 0;
++    WiiFillChunk(buf);
++    ASND_SetVoice(0, VOICE_STEREO_16BIT, static_cast<s32>(frequency), 0, buf, kWiiChunkFrames * 4, 255, 255, WiiVoiceCallback);
++}
++} // namespace
++#endif
++
+ void dkr::runtime::platform::queue_audio(std::int16_t* samples,
+                                          std::size_t sample_count) {
+     if (!dkr::runtime::netplay::external_side_effects_allowed()) return;
+@@ -2003,6 +2072,21 @@ void dkr::runtime::platform::queue_audio(std::int16_t* samples,
+             }
+         }
+     }
++#elif defined(GEKKO)
++    if (samples != nullptr && sample_count >= 2) {
++        const u32 frames = static_cast<u32>(sample_count / 2);
++        const u32 r = g_wii_ring_r.load(std::memory_order_acquire);
++        u32 w = g_wii_ring_w.load(std::memory_order_relaxed);
++        const u32 room = kWiiRingFrames - (w - r);
++        const u32 n = frames < room ? frames : room; // ring plein : on abandonne la fin du bloc
++        for (u32 i = 0; i < n; ++i) {
++            const u32 dst = ((w + i) & (kWiiRingFrames - 1)) * 2;
++            g_wii_ring[dst] = samples[i * 2];
++            g_wii_ring[dst + 1] = samples[i * 2 + 1];
++        }
++        g_wii_ring_w.store(w + n, std::memory_order_release);
++        if (!g_wii_voice_started && g_audio_frequency != 0) WiiStartVoice(g_audio_frequency);
++    }
+ #else
+     (void)samples;
+ #endif
+@@ -2063,6 +2147,15 @@ void dkr::runtime::platform::set_treble_gain(float decibels) {
+ }
+ 
+ std::size_t dkr::runtime::platform::audio_frames_remaining() {
++#if defined(GEKKO)
++    if (!g_wii_voice_started || g_audio_frequency == 0) return 0;
++    // Longueur "AI" = trames en attente au-dela d'un petit coussin (le jeu s'en sert pour dimensionner son prochain bloc)
++    const u32 queued = g_wii_ring_w.load(std::memory_order_acquire) - g_wii_ring_r.load(std::memory_order_acquire);
++    const u32 cushion = g_audio_frequency / 30U;
++    const u32 one_dma = g_audio_frequency / 30U;
++    const u32 over = queued > cushion ? queued - cushion : 0U;
++    return over < one_dma ? over : one_dma;
++#endif
+ #if DKR_RUNTIME_HAS_RT64
+     std::scoped_lock lock(g_platform_mutex);
+     if (g_audio_device != 0) {
+@@ -2115,6 +2208,11 @@ void dkr::runtime::platform::set_audio_frequency(std::uint32_t frequency) {
+     if (frequency == 0) {
+         return;
+     }
++#if defined(GEKKO)
++    g_audio_frequency = frequency;
++    if (g_wii_voice_started) ASND_ChangePitchVoice(0, static_cast<s32>(frequency));
++    return;
++#endif
+ #if DKR_RUNTIME_HAS_RT64
+     std::scoped_lock lock(g_platform_mutex);
+     if (g_audio_device != 0 && g_audio_frequency == frequency) {
+@@ -2163,6 +2261,298 @@ void dkr::runtime::platform::set_audio_frequency(std::uint32_t frequency) {
+ #endif
+ }
+ 
++#if defined(GEKKO)
++namespace {
++// Etat de connexion (lu par get_connected_device_info) et boutons N64 :
++// A 8000 B 4000 Z 2000 Start 1000 DU 0800 DD 0400 DL 0200 DR 0100 L 0020 R 0010 CU 0008 CD 0004 CL 0002 CR 0001
++std::atomic<bool> g_wii_connected[4] = {};
++bool g_wii_input_ready = false;
++volatile bool g_wii_quit_requested = false;
++
++// Direction par inclinaison de la Wiimote tenue a l'horizontale (support volant). Reglages dans sd:/apps/DKR-R/dkr-wii.cfg :
++//   tilt=1|0  range=<degres de braquage max>  dead=<zone morte en degres>  invert=1|0  audio=1|0
++struct WiiTiltConfig {
++    bool enabled = true;
++    float range_deg = 40.0F;
++    float dead_deg = 3.0F;
++    bool invert = false;
++} g_wii_tilt;
++bool g_wii_audio_on = true;
++bool g_wii_cfg_loaded = false;
++struct WiiCfgEntry { char key[24]; float value; };
++WiiCfgEntry g_wii_cfg_table[32];
++int g_wii_cfg_count = 0;
++int g_wii_pulse[4] = {};            // vibration courte de confirmation (nombre de scrutations restantes)
++bool g_wii_combo_prev[4] = {};
++
++void LoadWiiConfig() {
++    g_wii_cfg_loaded = true;
++    FILE* f = std::fopen("sd:/apps/DKR-R/dkr-wii.cfg", "r");
++    if (f == nullptr) return;
++    char line[96];
++    while (std::fgets(line, sizeof(line), f) != nullptr) {
++        float v = 0.0F;
++        {   // table generique : toute ligne `nom=valeur` est consultable via dkr_wii_cfg()
++            char key[24];
++            float val = 0.0F;
++            if (std::sscanf(line, "%23[a-z_0-9]=%f", key, &val) == 2 && g_wii_cfg_count < 32) {
++                std::strncpy(g_wii_cfg_table[g_wii_cfg_count].key, key, 23);
++                g_wii_cfg_table[g_wii_cfg_count].key[23] = 0;
++                g_wii_cfg_table[g_wii_cfg_count].value = val;
++                ++g_wii_cfg_count;
++            }
++        }
++        if (std::sscanf(line, "tilt=%f", &v) == 1) g_wii_tilt.enabled = v != 0.0F;
++        else if (std::sscanf(line, "range=%f", &v) == 1) g_wii_tilt.range_deg = std::clamp(v, 10.0F, 90.0F);
++        else if (std::sscanf(line, "dead=%f", &v) == 1) g_wii_tilt.dead_deg = std::clamp(v, 0.0F, 20.0F);
++        else if (std::sscanf(line, "invert=%f", &v) == 1) g_wii_tilt.invert = v != 0.0F;
++        else if (std::sscanf(line, "audio=%f", &v) == 1) g_wii_audio_on = v != 0.0F;
++    }
++    std::fclose(f);
++    std::fprintf(stderr, "[boot][input] Wii tilt steering: %s range=%.0f dead=%.0f invert=%d\n",
++                 g_wii_tilt.enabled ? "on" : "off", static_cast<double>(g_wii_tilt.range_deg),
++                 static_cast<double>(g_wii_tilt.dead_deg), g_wii_tilt.invert ? 1 : 0);
++}
++
++// Angle du volant en degres (positif = vers la droite) pour une Wiimote horizontale, boutons 1/2 a droite :
++// +X pointe vers le haut au repos (l'accelerometre lit +1g), tourner dans le sens horaire fait lire +Y.
++float WiiWheelAngle(int chan, bool* valid) {
++    vec3w_t a;
++    WPAD_Accel(chan, &a);
++    const float ax = static_cast<float>(static_cast<int>(a.x) - 512);
++    const float ay = static_cast<float>(static_cast<int>(a.y) - 512);
++    *valid = (ax * ax + ay * ay) > 400.0F; // trop faible : la telecommande est a plat (gravite sur Z)
++    return std::atan2(ay, ax) * (180.0F / 3.14159265F);
++}
++void WiiQuitCallback() { g_wii_quit_requested = true; }
++
++inline float WiiAxis(const joystick_t& js, bool y_axis, float dead) {
++    const int pos = y_axis ? js.pos.y : js.pos.x;
++    const int mn = y_axis ? js.min.y : js.min.x;
++    const int mx = y_axis ? js.max.y : js.max.x;
++    const int c = y_axis ? js.center.y : js.center.x;
++    const float range = static_cast<float>(pos >= c ? (mx - c) : (c - mn));
++    if (range <= 1.0F) return 0.0F;
++    const float v = static_cast<float>(pos - c) / range;
++    return std::fabs(v) < dead ? 0.0F : std::clamp(v, -1.0F, 1.0F);
++}
++
++
++// ---- Script d'entrees de test (debug) : sd:/apps/DKR-R/autoinput.txt, une ligne par appui :  <debut_s> <duree_s> <BOUTONS...>
++// BOUTONS : A B Z START UP DOWN LEFT RIGHT L R CU CD CL CR, SX=<-1..1>, SY=<-1..1> (separes par des espaces). Absent = aucun effet.
++struct AutoPress { float t0, dur; std::uint16_t buttons; float sx, sy; };
++AutoPress g_auto[96];
++int g_auto_count = 0;
++bool g_auto_loaded = false;
++u64 g_auto_start = 0;
++
++void LoadAutoInput() {
++    g_auto_loaded = true;
++    FILE* f = std::fopen("sd:/apps/DKR-R/autoinput.txt", "r");
++    if (f == nullptr) return;
++    char line[160];
++    while (g_auto_count < 96 && std::fgets(line, sizeof(line), f) != nullptr) {
++        float t0 = 0.0F, dur = 0.0F;
++        int consumed = 0;
++        if (line[0] == '#' || std::sscanf(line, "%f %f%n", &t0, &dur, &consumed) < 2) continue;
++        AutoPress a{t0, dur, 0, 0.0F, 0.0F};
++        char* tok = std::strtok(line + consumed, " \t\r\n");
++        while (tok != nullptr) {
++            if (!std::strcmp(tok, "A")) a.buttons |= 0x8000;
++            else if (!std::strcmp(tok, "B")) a.buttons |= 0x4000;
++            else if (!std::strcmp(tok, "Z")) a.buttons |= 0x2000;
++            else if (!std::strcmp(tok, "START")) a.buttons |= 0x1000;
++            else if (!std::strcmp(tok, "UP")) a.buttons |= 0x0800;
++            else if (!std::strcmp(tok, "DOWN")) a.buttons |= 0x0400;
++            else if (!std::strcmp(tok, "LEFT")) a.buttons |= 0x0200;
++            else if (!std::strcmp(tok, "RIGHT")) a.buttons |= 0x0100;
++            else if (!std::strcmp(tok, "L")) a.buttons |= 0x0020;
++            else if (!std::strcmp(tok, "R")) a.buttons |= 0x0010;
++            else if (!std::strcmp(tok, "CU")) a.buttons |= 0x0008;
++            else if (!std::strcmp(tok, "CD")) a.buttons |= 0x0004;
++            else if (!std::strcmp(tok, "CL")) a.buttons |= 0x0002;
++            else if (!std::strcmp(tok, "CR")) a.buttons |= 0x0001;
++            else if (!std::strncmp(tok, "SX=", 3)) a.sx = static_cast<float>(std::atof(tok + 3));
++            else if (!std::strncmp(tok, "SY=", 3)) a.sy = static_cast<float>(std::atof(tok + 3));
++            tok = std::strtok(nullptr, " \t\r\n");
++        }
++        g_auto[g_auto_count++] = a;
++    }
++    std::fclose(f);
++    g_auto_start = gettime();
++    std::fprintf(stderr, "[boot][input] autoinput: %d entrees\n", g_auto_count);
++}
++
++void ApplyAutoInput(std::uint16_t* n64, float* sx, float* sy) {
++    if (!g_auto_loaded) LoadAutoInput();
++    if (g_auto_count == 0) return;
++    const float t = static_cast<float>(ticks_to_millisecs(gettime() - g_auto_start)) / 1000.0F;
++    for (int i = 0; i < g_auto_count; ++i) {
++        if (t >= g_auto[i].t0 && t < g_auto[i].t0 + g_auto[i].dur) {
++            *n64 |= g_auto[i].buttons;
++            if (g_auto[i].sx != 0.0F) *sx = g_auto[i].sx;
++            if (g_auto[i].sy != 0.0F) *sy = g_auto[i].sy;
++        }
++    }
++}
++extern "C" void dkr_dump_flush();
++extern "C" void dkr_netlog_stop();
++void PollWiiControllers() {
++    if (!g_wii_input_ready) {
++        WPAD_SetDataFormat(WPAD_CHAN_ALL, WPAD_FMT_BTNS_ACC); // accelerometre pret pour l'inclinaison
++        SYS_SetResetCallback([](u32, void*) { WiiQuitCallback(); });
++        SYS_SetPowerCallback(WiiQuitCallback);
++        WPAD_SetPowerButtonCallback([](s32) { WiiQuitCallback(); });
++        g_wii_input_ready = true;
++        if (!g_wii_cfg_loaded) LoadWiiConfig();
++    }
++    const u32 pads_connected = PAD_ScanPads();
++    WPAD_ScanPads();
++    if (g_wii_quit_requested || (WPAD_ButtonsHeld(0) & WPAD_BUTTON_HOME)) {
++        for (int c = 0; c < 4; ++c) { PAD_ControlMotor(c, PAD_MOTOR_STOP); WPAD_Rumble(c, 0); }
++        dkr_netlog_stop(); // ferme les sockets et net_deinit() : sinon le Wi-Fi reste coupe au retour au HBC
++        dkr_dump_flush(); // ecrit texdump.bin / fbdump.bin (s'ils sont actives)
++        _exit(0); // retour au Homebrew Channel : sans destructeurs statiques (les threads tournent encore et plantaient en DSI)
++    }
++
++    for (std::size_t player = 0; player < kControllerCount; ++player) {
++        std::uint16_t n64 = 0;
++        float sx = 0.0F, sy = 0.0F;
++        bool connected = false;
++
++        // 1. Manette GameCube
++        if (pads_connected & (1U << player)) {
++            connected = true;
++            const u16 b = PAD_ButtonsHeld(static_cast<int>(player));
++            if (b & PAD_BUTTON_A)     n64 |= 0x8000;
++            if (b & PAD_BUTTON_B)     n64 |= 0x4000;
++            if (b & PAD_TRIGGER_Z)    n64 |= 0x2000;
++            if (b & PAD_BUTTON_START) n64 |= 0x1000;
++            if (b & PAD_BUTTON_UP)    n64 |= 0x0800;
++            if (b & PAD_BUTTON_DOWN)  n64 |= 0x0400;
++            if (b & PAD_BUTTON_LEFT)  n64 |= 0x0200;
++            if (b & PAD_BUTTON_RIGHT) n64 |= 0x0100;
++            if (b & PAD_TRIGGER_L)    n64 |= 0x0020;
++            if (b & PAD_TRIGGER_R)    n64 |= 0x0010;
++            if (b & PAD_BUTTON_Y)     n64 |= 0x0008; // C-haut
++            if (b & PAD_BUTTON_X)     n64 |= 0x0002; // C-gauche
++            const int csx = PAD_SubStickX(static_cast<int>(player));
++            const int csy = PAD_SubStickY(static_cast<int>(player));
++            if (csy > 40)  n64 |= 0x0008;
++            if (csy < -40) n64 |= 0x0004;
++            if (csx < -40) n64 |= 0x0002;
++            if (csx > 40)  n64 |= 0x0001;
++            const int gx = PAD_StickX(static_cast<int>(player));
++            const int gy = PAD_StickY(static_cast<int>(player));
++            if (std::abs(gx) > 12) sx = std::clamp(static_cast<float>(gx) / 72.0F, -1.0F, 1.0F);
++            if (std::abs(gy) > 12) sy = std::clamp(static_cast<float>(gy) / 72.0F, -1.0F, 1.0F);
++        }
++
++        // 2. Wiimote (seule, avec Nunchuk, ou Classic Controller)
++        u32 wtype = 0;
++        if (WPAD_Probe(static_cast<int>(player), &wtype) == WPAD_ERR_NONE) {
++            connected = true;
++            const u32 w = WPAD_ButtonsHeld(static_cast<int>(player));
++            expansion_t exp;
++            WPAD_Expansion(static_cast<int>(player), &exp);
++            if (exp.type == WPAD_EXP_CLASSIC) {
++                const u32 c = exp.classic.btns;
++                if (c & CLASSIC_CTRL_BUTTON_A)      n64 |= 0x8000;
++                if (c & CLASSIC_CTRL_BUTTON_B)      n64 |= 0x4000;
++                if (c & (CLASSIC_CTRL_BUTTON_ZL | CLASSIC_CTRL_BUTTON_ZR)) n64 |= 0x2000;
++                if (c & CLASSIC_CTRL_BUTTON_PLUS)   n64 |= 0x1000;
++                if (c & CLASSIC_CTRL_BUTTON_UP)     n64 |= 0x0800;
++                if (c & CLASSIC_CTRL_BUTTON_DOWN)   n64 |= 0x0400;
++                if (c & CLASSIC_CTRL_BUTTON_LEFT)   n64 |= 0x0200;
++                if (c & CLASSIC_CTRL_BUTTON_RIGHT)  n64 |= 0x0100;
++                if (c & CLASSIC_CTRL_BUTTON_FULL_L) n64 |= 0x0020;
++                if (c & CLASSIC_CTRL_BUTTON_FULL_R) n64 |= 0x0010;
++                if (c & CLASSIC_CTRL_BUTTON_X)      n64 |= 0x0008;
++                if (c & CLASSIC_CTRL_BUTTON_Y)      n64 |= 0x0002;
++                const float lx = WiiAxis(exp.classic.ljs, false, 0.15F);
++                const float ly = WiiAxis(exp.classic.ljs, true, 0.15F);
++                if (lx != 0.0F || ly != 0.0F) { sx = lx; sy = ly; }
++                const float rx = WiiAxis(exp.classic.rjs, false, 0.5F);
++                const float ry = WiiAxis(exp.classic.rjs, true, 0.5F);
++                if (ry > 0.0F) n64 |= 0x0008;
++                if (ry < 0.0F) n64 |= 0x0004;
++                if (rx < 0.0F) n64 |= 0x0002;
++                if (rx > 0.0F) n64 |= 0x0001;
++            } else if (exp.type == WPAD_EXP_NUNCHUK) {
++                // Wiimote (main droite) + Nunchuk (stick) : A/B comme sur N64
++                if (w & WPAD_BUTTON_A)     n64 |= 0x8000;
++                if (w & WPAD_BUTTON_B)     n64 |= 0x4000;
++                if (w & WPAD_BUTTON_PLUS)  n64 |= 0x1000;
++                if (w & WPAD_BUTTON_UP)    n64 |= 0x0800;
++                if (w & WPAD_BUTTON_DOWN)  n64 |= 0x0400;
++                if (w & WPAD_BUTTON_LEFT)  n64 |= 0x0200;
++                if (w & WPAD_BUTTON_RIGHT) n64 |= 0x0100;
++                if (w & WPAD_BUTTON_1)     n64 |= 0x0008;
++                if (w & WPAD_BUTTON_2)     n64 |= 0x0004;
++                if (w & WPAD_BUTTON_MINUS) n64 |= 0x0020;
++                if (exp.nunchuk.btns & NUNCHUK_BUTTON_Z) n64 |= 0x2000;
++                if (exp.nunchuk.btns & NUNCHUK_BUTTON_C) n64 |= 0x0010;
++                const float nx = WiiAxis(exp.nunchuk.js, false, 0.15F);
++                const float ny = WiiAxis(exp.nunchuk.js, true, 0.15F);
++                if (nx != 0.0F || ny != 0.0F) { sx = nx; sy = ny; }
++            } else {
++                // Wiimote tenue a l'horizontale (comme une manette NES / dans un support volant)
++                if (w & WPAD_BUTTON_2)     n64 |= 0x8000; // A : accelerer
++                if (w & WPAD_BUTTON_1)     n64 |= 0x4000; // B : freiner
++                if (w & WPAD_BUTTON_B)     n64 |= 0x2000; // Z (gachette) : arme
++                if (w & WPAD_BUTTON_A)     n64 |= 0x0010; // R : derapage/saut
++                if (w & WPAD_BUTTON_PLUS)  n64 |= 0x1000; // Start
++                if (w & WPAD_BUTTON_MINUS) n64 |= 0x0020; // L
++                // + et - ensemble : active/desactive la direction par inclinaison (le Start/L ci-dessus sont alors aussi emis une frame)
++                const bool combo = (w & WPAD_BUTTON_PLUS) && (w & WPAD_BUTTON_MINUS);
++                if (combo && !g_wii_combo_prev[player]) {
++                    g_wii_tilt.enabled = !g_wii_tilt.enabled;
++                    g_wii_pulse[player] = g_wii_tilt.enabled ? 14 : 4;
++                }
++                g_wii_combo_prev[player] = combo;
++                if (combo) n64 &= static_cast<std::uint16_t>(~0x1020U);
++                if (g_wii_tilt.enabled) {
++                    // Pave directionnel (tourne de 90 degres) = croix N64 pour les menus ; le volant = stick
++                    if (w & WPAD_BUTTON_UP)    n64 |= 0x0200;
++                    if (w & WPAD_BUTTON_DOWN)  n64 |= 0x0100;
++                    if (w & WPAD_BUTTON_LEFT)  n64 |= 0x0400;
++                    if (w & WPAD_BUTTON_RIGHT) n64 |= 0x0800;
++                    bool ok = false;
++                    const float ang = WiiWheelAngle(static_cast<int>(player), &ok);
++                    if (ok) {
++                        float v = 0.0F;
++                        if (std::fabs(ang) > g_wii_tilt.dead_deg) {
++                            v = (std::fabs(ang) - g_wii_tilt.dead_deg) / (g_wii_tilt.range_deg - g_wii_tilt.dead_deg);
++                            v = std::copysign(std::min(v, 1.0F), ang);
++                        }
++                        sx = g_wii_tilt.invert ? -v : v;
++                    }
++                } else {
++                    if (w & WPAD_BUTTON_UP)    sx = -1.0F;    // tournee de 90 degres : haut = gauche
++                    if (w & WPAD_BUTTON_DOWN)  sx = 1.0F;
++                    if (w & WPAD_BUTTON_LEFT)  sy = -1.0F;
++                    if (w & WPAD_BUTTON_RIGHT) sy = 1.0F;
++                }
++            }
++        }
++
++        if (g_wii_pulse[player] > 0) {
++            --g_wii_pulse[player];
++            WPAD_Rumble(static_cast<int>(player), g_wii_pulse[player] > 0 ? 1 : 0);
++        }
++        if (player == 0) ApplyAutoInput(&n64, &sx, &sy);
++        g_wii_connected[player].store(connected, std::memory_order_release);
++        g_buttons[player].store(n64, std::memory_order_release);
++        g_stick_x[player].store(sx, std::memory_order_release);
++        g_stick_y[player].store(sy, std::memory_order_release);
++        g_physical_buttons[player].store(n64, std::memory_order_release);
++        g_physical_stick_x[player].store(sx, std::memory_order_release);
++        g_physical_stick_y[player].store(sy, std::memory_order_release);
++    }
++}
++} // namespace
++#endif
++
+ void dkr::runtime::platform::poll_input() {
+ #if DKR_RUNTIME_HAS_RT64
+     if (g_input_backend_switch_in_progress.load(std::memory_order_acquire)) {
+@@ -2242,6 +2632,9 @@ void dkr::runtime::platform::poll_input() {
+             g_stick_y[player].store(state.stick_y, std::memory_order_release);
+         }
+     }
++#else
++#if defined(GEKKO)
++    PollWiiControllers();
+ #else
+     for (std::size_t player = 0; player < kControllerCount; ++player) {
+         g_buttons[player].store(0, std::memory_order_release);
+@@ -2252,6 +2645,7 @@ void dkr::runtime::platform::poll_input() {
+         g_physical_stick_y[player].store(0.0F, std::memory_order_release);
+     }
+ #endif
++#endif
+ }
+ 
+ void dkr::runtime::platform::set_online_input_routing(
+@@ -2368,6 +2762,13 @@ void dkr::runtime::platform::set_rumble(int controller, bool enabled) {
+         SDL_GameControllerRumble(game_controller, strength, strength,
+                                  active ? SDL_HAPTIC_INFINITY : 0U);
+     }
++#elif defined(GEKKO)
++    if (controller < 0 || controller >= static_cast<int>(kControllerCount)) return;
++    // Le Rumble Pak N64 devient la vibration de la manette GameCube (moteur) et de la Wiimote.
++    const bool active = enabled && g_rumble_enabled.load(std::memory_order_acquire) &&
++                        g_rumble_strength.load(std::memory_order_relaxed) > 0.05F;
++    PAD_ControlMotor(controller, active ? PAD_MOTOR_RUMBLE : PAD_MOTOR_STOP);
++    WPAD_Rumble(controller, active ? 1 : 0);
+ #else
+     (void)controller;
+     (void)enabled;
+@@ -2471,6 +2872,13 @@ dkr::runtime::platform::get_connected_device_info(int controller) {
+                 expose_rumble, has_gamepad)
+                 ? ultramodern::input::Pak::RumblePak
+                 : ultramodern::input::Pak::None};
++#elif defined(GEKKO)
++    // Le port 1 est toujours present ; les autres suivent les manettes (GameCube / Wiimote) reellement connectees.
++    const bool present = controller == 0 || g_wii_connected[controller].load(std::memory_order_acquire);
++    if (!present) return {ultramodern::input::Device::None, ultramodern::input::Pak::None};
++    return {ultramodern::input::Device::Controller,
++            g_rumble_enabled.load(std::memory_order_acquire) ? ultramodern::input::Pak::RumblePak
++                                                              : ultramodern::input::Pak::None};
+ #else
+     return {ultramodern::input::Device::Controller, ultramodern::input::Pak::None};
+ #endif
+@@ -3047,3 +3455,22 @@ void dkr::runtime::platform::restore_controller_assignments(
+     (void)assignments;
+ #endif
+ }
++
++#if defined(GEKKO)
++// Utilise par GetRspMicrocode : audio=0 dans dkr-wii.cfg saute la synthese RSP (silence) si la console est trop lente.
++extern "C" bool dkr_wii_audio_enabled() {
++    if (!g_wii_cfg_loaded) LoadWiiConfig();
++    return g_wii_audio_on;
++}
++#endif
++
++#if defined(GEKKO)
++// Valeur de configuration (sd:/apps/DKR-R/dkr-wii.cfg), `def` si la cle est absente.
++extern "C" float dkr_wii_cfg(const char* key, float def) {
++    if (!g_wii_cfg_loaded) LoadWiiConfig();
++    for (int i = 0; i < g_wii_cfg_count; ++i) {
++        if (std::strcmp(g_wii_cfg_table[i].key, key) == 0) return g_wii_cfg_table[i].value;
++    }
++    return def;
++}
++#endif
+diff --git a/runtime-recomp/src/game/runtime_stubs.cpp b/runtime-recomp/src/game/runtime_stubs.cpp
+index 9dd5cb9..4e2bd2d 100644
+--- a/runtime-recomp/src/game/runtime_stubs.cpp
++++ b/runtime-recomp/src/game/runtime_stubs.cpp
+@@ -31,6 +31,12 @@
+ 
+ namespace {
+ 
++gpr RdramAddress(std::uint32_t address) {
++    return static_cast<gpr>(static_cast<std::int32_t>(address));
++}
++
++dkr::runtime::intro::TailGate g_title_intro_tail_gate{};
++
+ #if DKR_RUNTIME_HAS_RT64
+ const std::uint32_t& kOrthoMatrixAddress =
+     dkr::runtime::revision_addresses::OrthoMatrix;
+@@ -77,7 +83,6 @@ dkr::runtime::presentation::PresentationKey g_level_segment_pending_key{};
+ bool g_split_world_aspect_active = false;
+ bool g_postrace_framed_scope_active = false;
+ bool g_track_select_lens_flare_scope_active = false;
+-dkr::runtime::intro::TailGate g_title_intro_tail_gate{};
+ std::array<float, 8> g_saved_sky_projection_columns{};
+ bool g_sky_cover_active = false;
+ dkr::runtime::presentation::PostraceFrameGate g_postrace_frame_gate{};
+@@ -112,10 +117,6 @@ void WriteRdramFloat(std::uint8_t* rdram, std::uint32_t address, float value) {
+     MEM_W(0, signed_address) = std::bit_cast<std::uint32_t>(value);
+ }
+ 
+-gpr RdramAddress(std::uint32_t address) {
+-    return static_cast<gpr>(static_cast<std::int32_t>(address));
+-}
+-
+ bool PostraceFullViewScope(std::uint8_t* rdram, float cover) {
+     namespace addresses = dkr::runtime::revision_addresses;
+     const auto word = [rdram](std::uint32_t address) {
+diff --git a/runtime-recomp/src/game/runtime_support.cpp b/runtime-recomp/src/game/runtime_support.cpp
+index 8c425e0..b0504db 100644
+--- a/runtime-recomp/src/game/runtime_support.cpp
++++ b/runtime-recomp/src/game/runtime_support.cpp
+@@ -19,6 +19,8 @@
+ #include <Shellapi.h>
+ #include <dxgi1_6.h>
+ #include <winioctl.h>
++#elif defined(GEKKO)
++// libogc Wii environment
+ #else
+ #include <sys/sysinfo.h>
+ #include <sys/utsname.h>
+@@ -262,6 +264,9 @@ bool open_directory(const std::filesystem::path& directory,
+         error = "Windows could not open that DKR-R support folder.";
+         return false;
+     }
++#elif defined(GEKKO)
++    error = "Directory browsing not supported on Wii.";
++    return false;
+ #else
+     const pid_t child = fork();
+     if (child == 0) {
+@@ -331,6 +336,13 @@ SystemSummary collect_system_summary() {
+     GetModuleFileNameW(nullptr, executable,
+                        static_cast<DWORD>(std::size(executable)));
+     result.application_drive = WindowsDriveKind(executable);
++#elif defined(GEKKO)
++    result.operating_system = "Nintendo Wii (Broadway / libogc)";
++    result.cpu = "PowerPC 750CL @ 729 MHz";
++    result.memory = "88 MB (24 MB MEM1 + 64 MB MEM2)";
++    result.gpu = "ATI Hollywood GX @ 243 MHz";
++    result.boot_drive = "SD / USB";
++    result.application_drive = "SD / USB";
+ #else
+     struct utsname system_name{};
+     result.operating_system = uname(&system_name) == 0
+diff --git a/scripts/apply-dependency-patches.sh b/scripts/apply-dependency-patches.sh
+index 478809e..6ce34f1 100644
+--- a/scripts/apply-dependency-patches.sh
++++ b/scripts/apply-dependency-patches.sh
+@@ -59,6 +59,7 @@ for dependency in data["dependencies"]:
+     # re-apply everything. Safe because the commit is pinned and verified.
+     print(f"[INFO] {dependency['name']}: resetting to pinned commit and re-applying all patches")
+     subprocess.run(["git", "-C", str(repo), "checkout", "--", "."], check=True)
++    subprocess.run(["git", "-C", str(repo), "clean", "-fd"], check=True)
+     for entry, p in patches:
+         subprocess.run(["git", "-C", str(repo), "apply", str(p)], check=True)
+         print(f"[OK] {dependency['name']}: {entry['path']} (applied)")

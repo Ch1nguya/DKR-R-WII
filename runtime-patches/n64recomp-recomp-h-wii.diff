@@ -1,0 +1,154 @@
+diff --git a/include/recomp.h b/include/recomp.h
+index 73f3e73..edece29 100644
+--- a/include/recomp.h
++++ b/include/recomp.h
+@@ -67,7 +67,32 @@ static inline void DMULTU(uint64_t a, uint64_t b, uint64_t* lo64, uint64_t* hi64
+ }
+ 
+ #else
+-#error "128-bit integer type not found"
++
++static inline void DMULTU(uint64_t a, uint64_t b, uint64_t* lo64, uint64_t* hi64) {
++    uint64_t a_lo = (uint32_t)a;
++    uint64_t a_hi = a >> 32;
++    uint64_t b_lo = (uint32_t)b;
++    uint64_t b_hi = b >> 32;
++
++    uint64_t p0 = a_lo * b_lo;
++    uint64_t p1 = a_lo * b_hi;
++    uint64_t p2 = a_hi * b_lo;
++    uint64_t p3 = a_hi * b_hi;
++
++    uint64_t cy0 = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
++    *lo64 = (p0 & 0xFFFFFFFFULL) | (cy0 << 32);
++    *hi64 = p3 + (p1 >> 32) + (p2 >> 32) + (cy0 >> 32);
++}
++
++static inline void DMULT(int64_t a, int64_t b, int64_t* lo64, int64_t* hi64) {
++    uint64_t u_lo, u_hi;
++    DMULTU((uint64_t)a, (uint64_t)b, &u_lo, &u_hi);
++    if (a < 0) u_hi -= (uint64_t)b;
++    if (b < 0) u_hi -= (uint64_t)a;
++    *lo64 = (int64_t)u_lo;
++    *hi64 = (int64_t)u_hi;
++}
++
+ #endif
+ 
+ static inline void DDIV(int64_t a, int64_t b, int64_t* quot, int64_t* rem) {
+@@ -83,6 +108,16 @@ static inline void DDIVU(uint64_t a, uint64_t b, uint64_t* quot, uint64_t* rem)
+ 
+ typedef uint64_t gpr;
+ 
++// The recompiled code stores guest memory in the host's native word order: byte and halfword accesses are swizzled
++// on little-endian hosts, and must not be on big-endian ones (e.g. the Wii's PowerPC Broadway).
++#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
++#define RECOMP_BYTE_XOR 0
++#define RECOMP_HALF_XOR 0
++#else
++#define RECOMP_BYTE_XOR 3
++#define RECOMP_HALF_XOR 2
++#endif
++
+ #define SIGNED(val) \
+     ((int64_t)(val))
+ 
+@@ -96,16 +131,16 @@ typedef uint64_t gpr;
+     (*(int32_t*)(rdram + ((((reg) + (offset))) - 0xFFFFFFFF80000000)))
+ 
+ #define MEM_H(offset, reg) \
+-    (*(int16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(int16_t*)(rdram + ((((reg) + (offset)) ^ RECOMP_HALF_XOR) - 0xFFFFFFFF80000000)))
+ 
+ #define MEM_B(offset, reg) \
+-    (*(int8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(int8_t*)(rdram + ((((reg) + (offset)) ^ RECOMP_BYTE_XOR) - 0xFFFFFFFF80000000)))
+ 
+ #define MEM_HU(offset, reg) \
+-    (*(uint16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
++    (*(uint16_t*)(rdram + ((((reg) + (offset)) ^ RECOMP_HALF_XOR) - 0xFFFFFFFF80000000)))
+ 
+ #define MEM_BU(offset, reg) \
+-    (*(uint8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
++    (*(uint8_t*)(rdram + ((((reg) + (offset)) ^ RECOMP_BYTE_XOR) - 0xFFFFFFFF80000000)))
+ 
+ #define SD(val, offset, reg) { \
+     *(uint32_t*)(rdram + ((((reg) + (offset) + 4)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 0); \
+@@ -400,6 +435,17 @@ static inline int64_t do_cvt_l_d(double val) {
+ 
+ typedef union {
+     double d;
++#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
++    // On big-endian hosts the high half of the 64-bit value comes first in memory.
++    struct {
++        float fh;
++        float fl;
++    };
++    struct {
++        uint32_t u32h;
++        uint32_t u32l;
++    };
++#else
+     struct {
+         float fl;
+         float fh;
+@@ -408,10 +454,11 @@ typedef union {
+         uint32_t u32l;
+         uint32_t u32h;
+     };
++#endif
+     uint64_t u64;
+ } fpr;
+ 
+-typedef struct {
++typedef struct recomp_context {
+     gpr r0,  r1,  r2,  r3,  r4,  r5,  r6,  r7,
+         r8,  r9,  r10, r11, r12, r13, r14, r15,
+         r16, r17, r18, r19, r20, r21, r22, r23,
+@@ -446,9 +493,15 @@ typedef void (recomp_func_t)(uint8_t* rdram, recomp_context* ctx);
+ typedef void (recomp_func_ext_t)(uint8_t* rdram, recomp_context* ctx, uintptr_t arg);
+ 
+ recomp_func_t* get_function(int32_t vram);
+-
++#if defined(GEKKO)
++// Same as get_function, but reports the calling guest function if the lookup fails.
++recomp_func_t* get_function_dbg(int32_t vram, const char* caller);
++#define LOOKUP_FUNC(val) \
++    get_function_dbg((int32_t)(val), __func__)
++#else
+ #define LOOKUP_FUNC(val) \
+     get_function((int32_t)(val))
++#endif
+ 
+ extern int32_t* section_addresses;
+ 
+diff --git a/lib/ELFIO b/lib/ELFIO
+--- a/lib/ELFIO
++++ b/lib/ELFIO
+@@ -1 +1 @@
+-Subproject commit ad8b641f9682b6091ba8b9f7c8152255c1a2c803
++Subproject commit ad8b641f9682b6091ba8b9f7c8152255c1a2c803-dirty
+diff --git a/lib/fmt b/lib/fmt
+--- a/lib/fmt
++++ b/lib/fmt
+@@ -1 +1 @@
+-Subproject commit 407c905e45ad75fc29bf0f9bb7c5c2fd3475976f
++Subproject commit 407c905e45ad75fc29bf0f9bb7c5c2fd3475976f-dirty
+diff --git a/lib/rabbitizer b/lib/rabbitizer
+--- a/lib/rabbitizer
++++ b/lib/rabbitizer
+@@ -1 +1 @@
+-Subproject commit e0d8003047938e2ec3697eaf8d61a84d11d17b43
++Subproject commit e0d8003047938e2ec3697eaf8d61a84d11d17b43-dirty
+diff --git a/lib/sljit b/lib/sljit
+--- a/lib/sljit
++++ b/lib/sljit
+@@ -1 +1 @@
+-Subproject commit f6326087b3404efb07c6d3deed97b3c3b8098c0c
++Subproject commit f6326087b3404efb07c6d3deed97b3c3b8098c0c-dirty
+diff --git a/lib/tomlplusplus b/lib/tomlplusplus
+--- a/lib/tomlplusplus
++++ b/lib/tomlplusplus
+@@ -1 +1 @@
+-Subproject commit 1f7884e59165e517462f922e7b6de131bd9844f3
++Subproject commit 1f7884e59165e517462f922e7b6de131bd9844f3-dirty

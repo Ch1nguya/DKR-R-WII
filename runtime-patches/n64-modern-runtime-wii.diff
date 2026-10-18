@@ -1,0 +1,2325 @@
+diff --git a/librecomp/CMakeLists.txt b/librecomp/CMakeLists.txt
+index fcc3337..0120bb4 100644
+--- a/librecomp/CMakeLists.txt
++++ b/librecomp/CMakeLists.txt
+@@ -48,11 +48,15 @@ target_include_directories(librecomp PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/librecomp"
+ )
+ 
+-target_compile_options(librecomp PRIVATE
+-#    -Wall
+-#    -Wextra
+-    -Wno-unused-parameter
+-)
++if (MSVC)
++    target_compile_options(librecomp PRIVATE /wd4100)
++else()
++    target_compile_options(librecomp PRIVATE
++    #    -Wall
++    #    -Wextra
++        -Wno-unused-parameter
++    )
++endif()
+ 
+ if (WIN32)
+     add_compile_definitions(NOMINMAX)
+diff --git a/librecomp/include/librecomp/addresses.hpp b/librecomp/include/librecomp/addresses.hpp
+index b1b50cb..843ce6b 100644
+--- a/librecomp/include/librecomp/addresses.hpp
++++ b/librecomp/include/librecomp/addresses.hpp
+@@ -6,10 +6,10 @@
+ #include "recomp.h"
+ 
+ namespace recomp {
+-    // 512GB (kseg0 size)
+-    constexpr size_t mem_size = 512ULL * 1024ULL * 1024ULL;
++    // 512MB (kseg0 size)
++    constexpr uint64_t mem_size = 512ULL * 1024ULL * 1024ULL;
+     // 4GB (the full address space)
+-    constexpr size_t allocation_size = 4096ULL * 1024ULL * 1024ULL;
++    constexpr uint64_t allocation_size = 4096ULL * 1024ULL * 1024ULL;
+     // We need a place in rdram to hold the PI handles, so pick an address in extended rdram
+     constexpr int32_t cart_handle = 0x80800000;
+     constexpr int32_t drive_handle = (int32_t)(cart_handle + sizeof(OSPiHandle));
+diff --git a/librecomp/include/librecomp/game.hpp b/librecomp/include/librecomp/game.hpp
+index 6df55ee..ba6128f 100644
+--- a/librecomp/include/librecomp/game.hpp
++++ b/librecomp/include/librecomp/game.hpp
+@@ -33,6 +33,7 @@ namespace recomp {
+         void (*entrypoint)(uint8_t* rdram, recomp_context* context) = nullptr;
+ 
+         void (*thread_create_callback)(uint8_t* rdram, recomp_context* context) = nullptr;
++        void (*thread_destroy_callback)(uint8_t* rdram, recomp_context* context) = nullptr;
+ 
+         void (*on_init_callback)(uint8_t* rdram, recomp_context* context) = nullptr;
+ 
+@@ -97,6 +98,7 @@ namespace recomp {
+         ultramodern::input::callbacks_t input_callbacks;
+         ultramodern::gfx_callbacks_t gfx_callbacks;
+         ultramodern::events::callbacks_t events_callbacks;
++        bool (*save_write_allowed_callback)() = nullptr;
+         ultramodern::error_handling::callbacks_t error_handling_callbacks;
+         ultramodern::threads::callbacks_t threads_callbacks;
+         ultramodern::MessageQueueControl message_queue_control;
+@@ -111,6 +113,7 @@ namespace recomp {
+ 
+     SaveType get_save_type();
+     bool eeprom_allowed();
++    bool save_write_allowed();
+     bool sram_allowed();
+     bool flashram_allowed();
+ 
+diff --git a/librecomp/include/librecomp/mods.hpp b/librecomp/include/librecomp/mods.hpp
+index d7a464e..f8f91bf 100644
+--- a/librecomp/include/librecomp/mods.hpp
++++ b/librecomp/include/librecomp/mods.hpp
+@@ -49,12 +49,19 @@ template <>
+ struct std::hash<recomp::mods::HookDefinition>
+ {
+     std::size_t operator()(const recomp::mods::HookDefinition& def) const {
++#if defined(__SIZEOF_SIZE_T__) && __SIZEOF_SIZE_T__ == 4
++        // 32-bit platform fallback hash
++        uint32_t h1 = static_cast<uint32_t>(def.section_rom);
++        uint32_t h2 = static_cast<uint32_t>(def.function_vram) | (def.at_return ? 1u : 0u);
++        return static_cast<std::size_t>(h1 ^ (h2 * 2654435761u));
++#else
+         // This hash packing only works if the resulting value is 64 bits.
+         static_assert(sizeof(std::size_t) == 8);
+         // Combine the three values into a single 64-bit value.
+         // The lower 2 bits of a function address will always be zero, so pack
+         // the value of at_return into the lowest bit.
+         return (size_t(def.section_rom) << 32) | size_t(def.function_vram) | size_t(def.at_return ? 1 : 0);
++#endif
+     }
+ };
+ 
+diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
+index 748558c..c55a53e 100644
+--- a/librecomp/include/librecomp/rsp.hpp
++++ b/librecomp/include/librecomp/rsp.hpp
+@@ -39,29 +39,29 @@ extern uint16_t rspReciprocals[512];
+ extern uint16_t rspInverseSquareRoots[512];
+ 
+ #define RSP_MEM_B(offset, addr) \
+-    (*reinterpret_cast<int8_t*>(dmem + (0xFFF & (((offset) + (addr)) ^ 3))))
++    (*reinterpret_cast<int8_t*>(dmem + (0xFFF & (((offset) + (addr)) ^ RECOMP_BYTE_XOR))))
+ 
+ #define RSP_MEM_BU(offset, addr) \
+-    (*reinterpret_cast<uint8_t*>(dmem + (0xFFF & (((offset) + (addr)) ^ 3))))
++    (*reinterpret_cast<uint8_t*>(dmem + (0xFFF & (((offset) + (addr)) ^ RECOMP_BYTE_XOR))))
+ 
+ static inline uint32_t RSP_MEM_W_LOAD(uint32_t offset, uint32_t addr) {
+     uint32_t out;
+     for (int i = 0; i < 4; i++) {
+-        reinterpret_cast<uint8_t*>(&out)[i ^ 3] = RSP_MEM_BU(offset + i, addr);
++        reinterpret_cast<uint8_t*>(&out)[i ^ RECOMP_BYTE_XOR] = RSP_MEM_BU(offset + i, addr);
+     }
+     return out;
+ }
+ 
+ static inline void RSP_MEM_W_STORE(uint32_t offset, uint32_t addr, uint32_t val) {
+     for (int i = 0; i < 4; i++) {
+-        RSP_MEM_BU(offset + i, addr) = reinterpret_cast<uint8_t*>(&val)[i ^ 3];
++        RSP_MEM_BU(offset + i, addr) = reinterpret_cast<uint8_t*>(&val)[i ^ RECOMP_BYTE_XOR];
+     }
+ }
+ 
+ static inline uint32_t RSP_MEM_HU_LOAD(uint32_t offset, uint32_t addr) {
+     uint16_t out;
+     for (int i = 0; i < 2; i++) {
+-        reinterpret_cast<uint8_t*>(&out)[(i + 2) ^ 3] = RSP_MEM_BU(offset + i, addr);
++        reinterpret_cast<uint8_t*>(&out)[i ^ (RECOMP_BYTE_XOR & 1)] = RSP_MEM_BU(offset + i, addr);
+     }
+     return out;
+ }
+@@ -69,14 +69,14 @@ static inline uint32_t RSP_MEM_HU_LOAD(uint32_t offset, uint32_t addr) {
+ static inline uint32_t RSP_MEM_H_LOAD(uint32_t offset, uint32_t addr) {
+     int16_t out;
+     for (int i = 0; i < 2; i++) {
+-        reinterpret_cast<uint8_t*>(&out)[(i + 2) ^ 3] = RSP_MEM_BU(offset + i, addr);
++        reinterpret_cast<uint8_t*>(&out)[i ^ (RECOMP_BYTE_XOR & 1)] = RSP_MEM_BU(offset + i, addr);
+     }
+     return out;
+ }
+ 
+ static inline void RSP_MEM_H_STORE(uint32_t offset, uint32_t addr, uint32_t val) {
+     for (int i = 0; i < 2; i++) {
+-        RSP_MEM_BU(offset + i, addr) = reinterpret_cast<uint8_t*>(&val)[(i + 2) ^ 3];
++        RSP_MEM_BU(offset + i, addr) = reinterpret_cast<uint8_t*>(&val)[(i + 2) ^ RECOMP_BYTE_XOR];
+     }
+ }
+ 
+diff --git a/librecomp/include/librecomp/rsp_vu.hpp b/librecomp/include/librecomp/rsp_vu.hpp
+index 2fbbd8a..05283de 100644
+--- a/librecomp/include/librecomp/rsp_vu.hpp
++++ b/librecomp/include/librecomp/rsp_vu.hpp
+@@ -52,6 +52,27 @@ using u64 = uint64_t;
+ using s64 = int64_t;
+ using uint128_t = uint64_t[2];
+ 
++// Les registres vectoriels RSP sont stockés comme un entier de 128 bits dont la voie 0 est l'octet de poids fort :
++// little-endian (x86/ARM) -> index inversé ; big-endian (Wii/PowerPC) -> ordre naturel.
++// Les accesseurs ci-dessous lisent/ecrivent le registre (stocke en uint64_t) par des pointeurs 8/16 bits : types may_alias
++// obligatoires, sinon GCC (strict aliasing) peut supprimer ou reordonner les copies de registres a -O2.
++#if defined(__GNUC__)
++typedef uint8_t  rsp_u8_alias  __attribute__((may_alias));
++typedef uint16_t rsp_u16_alias __attribute__((may_alias));
++typedef int16_t  rsp_s16_alias __attribute__((may_alias));
++#else
++typedef uint8_t  rsp_u8_alias;
++typedef uint16_t rsp_u16_alias;
++typedef int16_t  rsp_s16_alias;
++#endif
++#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
++#define RSP_LANE8(i)  (i)
++#define RSP_LANE16(i) (i)
++#else
++#define RSP_LANE8(i)  (15 - (i))
++#define RSP_LANE16(i) (7 - (i))
++#endif
++
+ template<u32 bits> inline auto sclamp(s64 x) -> s64 {
+   enum : s64 { b = 1ull << (bits - 1), m = b - 1 };
+   return (x > m) ? m : (x < -b) ? -b : x;
+@@ -75,20 +96,20 @@ struct RSP {
+         auto operator=(__m128i value) { v128 = value; }
+ #endif
+ 
+-        auto byte(u32 index) -> uint8_t& { return ((uint8_t*)&u128)[15 - index]; }
+-        auto byte(u32 index) const -> uint8_t { return ((uint8_t*)&u128)[15 - index]; }
++        auto byte(u32 index) -> rsp_u8_alias& { return ((rsp_u8_alias*)&u128)[RSP_LANE8(index)]; }
++        auto byte(u32 index) const -> uint8_t { return ((rsp_u8_alias*)&u128)[RSP_LANE8(index)]; }
+ 
+-        auto element(u32 index) -> uint16_t& { return ((uint16_t*)&u128)[7 - index]; }
+-        auto element(u32 index) const -> uint16_t { return ((uint16_t*)&u128)[7 - index]; }
++        auto element(u32 index) -> rsp_u16_alias& { return ((rsp_u16_alias*)&u128)[RSP_LANE16(index)]; }
++        auto element(u32 index) const -> uint16_t { return ((rsp_u16_alias*)&u128)[RSP_LANE16(index)]; }
+ 
+-        auto u8(u32 index) -> uint8_t& { return ((uint8_t*)&u128)[15 - index]; }
+-        auto u8(u32 index) const -> uint8_t { return ((uint8_t*)&u128)[15 - index]; }
++        auto u8(u32 index) -> rsp_u8_alias& { return ((rsp_u8_alias*)&u128)[RSP_LANE8(index)]; }
++        auto u8(u32 index) const -> uint8_t { return ((rsp_u8_alias*)&u128)[RSP_LANE8(index)]; }
+ 
+-        auto s16(u32 index) -> int16_t& { return ((int16_t*)&u128)[7 - index]; }
+-        auto s16(u32 index) const -> int16_t { return ((int16_t*)&u128)[7 - index]; }
++        auto s16(u32 index) -> rsp_s16_alias& { return ((rsp_s16_alias*)&u128)[RSP_LANE16(index)]; }
++        auto s16(u32 index) const -> int16_t { return ((rsp_s16_alias*)&u128)[RSP_LANE16(index)]; }
+ 
+-        auto u16(u32 index) -> uint16_t& { return ((uint16_t*)&u128)[7 - index]; }
+-        auto u16(u32 index) const -> uint16_t { return ((uint16_t*)&u128)[7 - index]; }
++        auto u16(u32 index) -> rsp_u16_alias& { return ((rsp_u16_alias*)&u128)[RSP_LANE16(index)]; }
++        auto u16(u32 index) const -> uint16_t { return ((rsp_u16_alias*)&u128)[RSP_LANE16(index)]; }
+ 
+         //VCx registers
+         auto get(u32 index) const -> bool { return u16(index) != 0; }
+diff --git a/librecomp/include/librecomp/rsp_vu_impl.hpp b/librecomp/include/librecomp/rsp_vu_impl.hpp
+index dbf46b2..ed78e23 100644
+--- a/librecomp/include/librecomp/rsp_vu_impl.hpp
++++ b/librecomp/include/librecomp/rsp_vu_impl.hpp
+@@ -38,7 +38,7 @@ using u32 = uint32_t;
+ 
+ auto RSP::r128::operator()(u32 index) const -> r128 {
+     if constexpr (Accuracy::RSP::SISD) {
+-        r128 v{ *this };
++        r128 v = *this; // copie explicite (la liste d initialisation {*this} est mal interpretee par GCC PowerPC)
+         switch (index) {
+         case  0: break;
+         case  1: break;
+diff --git a/librecomp/src/cont.cpp b/librecomp/src/cont.cpp
+index 7ad6c21..16ec29a 100644
+--- a/librecomp/src/cont.cpp
++++ b/librecomp/src/cont.cpp
+@@ -37,9 +37,14 @@ extern "C" void osContReset_recomp(uint8_t* rdram, recomp_context* ctx) {
+ extern "C" void osContStartReadData_recomp(uint8_t* rdram, recomp_context* ctx) {
+     PTR(OSMesgQueue) mq = _arg<0, PTR(OSMesgQueue)>(rdram, ctx);
+ 
+-    s32 ret = osContStartReadData(PASS_RDRAM mq);
+-
+-    _return<s32>(ctx, ret);
++    // Install the synchronized authored input before posting the SI completion
++    // edge. Otherwise the emulated consumer can wake and read the neutral
++    // online ports before the frame-boundary callback has filled them.
++    ultramodern::input::prepare_input_read();
++    ultramodern::input::notify_frame_boundary(rdram, ctx);
++    ultramodern::input::complete_input_read();
++
++    _return<s32>(ctx, 0);
+ }
+ 
+ extern "C" void osContGetReadData_recomp(uint8_t* rdram, recomp_context* ctx) {
+diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
+index ff40212..40ab514 100644
+--- a/librecomp/src/mods.cpp
++++ b/librecomp/src/mods.cpp
+@@ -74,6 +74,8 @@ bool get_to_vec(const nlohmann::json& val, std::vector<T2>& out) {
+ // MSVC/GCC/Clang ARM64
+ #elif defined(__ARM_ARCH_ISA_A64)
+ #   define IS_ARM64
++#elif defined(GEKKO) || defined(__powerpc__)
++#   define IS_PPC
+ #else
+ #   error "Unsupported architecture!"
+ #endif
+@@ -165,6 +167,34 @@ void protect(void* target_func, uint64_t old_flags) {
+         &dummy_old_flags);
+     (void)result;
+ }
++#elif defined(GEKKO)
++class recomp::mods::DynamicLibrary {
++public:
++    static constexpr std::string_view PlatformExtension = ".so";
++    DynamicLibrary() = default;
++    DynamicLibrary(const std::filesystem::path& path) : native_handle(nullptr), api_version((uint32_t)-1) {}
++    ~DynamicLibrary() = default;
++    DynamicLibrary(const DynamicLibrary&) = delete;
++    DynamicLibrary& operator=(const DynamicLibrary&) = delete;
++    DynamicLibrary(DynamicLibrary&&) = delete;
++    DynamicLibrary& operator=(DynamicLibrary&&) = delete;
++
++    void unload() {}
++    bool good() const { return false; }
++    template <typename T>
++    bool get_dll_symbol(T& out, const char* name) const { return false; }
++    uint32_t get_api_version() { return api_version; }
++private:
++    void* native_handle = nullptr;
++    uint32_t api_version = (uint32_t)-1;
++};
++
++void unprotect(void* target_func, uint64_t* old_flags) {
++    *old_flags = 0;
++}
++
++void protect(void* target_func, uint64_t old_flags) {
++}
+ #else
+ #  include <unistd.h>
+ #  include <dlfcn.h>
+@@ -585,6 +615,10 @@ void patch_func(recomp_func_t* target_func, recomp::mods::GenericFunction replac
+            write_bytes(&native_func, sizeof(&native_func));
+         }
+     }, replacement_func);
++#elif defined(IS_PPC)
++    // On Wii/PPC, dynamic code mod function patching is not used in standalone port.
++    // If needed: lis r12, hi; ori r12, r12, lo; mtctr r12; bctr
++    (void)write_bytes;
+ #else
+ #   error "Unsupported architecture"
+ #endif
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index 8c8e5d1..318a7c0 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -361,6 +361,15 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
+ }
+ 
++extern "C" recomp_func_t * get_function_dbg(int32_t addr, const char* caller) {
++    auto func_find = func_map.find(addr);
++    if (func_find == func_map.end()) {
++        fprintf(stderr, "Failed to find function at 0x%08X (called from %s)\n", addr, caller);
++        std::exit(EXIT_FAILURE);
++    }
++    return func_find->second;
++}
++
+ extern "C" recomp_func_t * get_function(int32_t addr) {
+     auto func_find = func_map.find(addr);
+     if (func_find == func_map.end()) {
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 43509ba..5230cb7 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -163,6 +163,7 @@ void saving_thread_func(RDRAM_ARG1) {
+ }
+ 
+ void save_write_ptr(const void* in, uint32_t offset, uint32_t count) {
++    if (!recomp::save_write_allowed()) return;
+     assert(offset + count <= save_context.save_buffer.size());
+ 
+     {
+@@ -174,6 +175,7 @@ void save_write_ptr(const void* in, uint32_t offset, uint32_t count) {
+ }
+ 
+ void save_write(RDRAM_ARG PTR(void) rdram_address, uint32_t offset, uint32_t count) {
++    if (!recomp::save_write_allowed()) return;
+     assert(offset + count <= save_context.save_buffer.size());
+ 
+     {
+@@ -196,6 +198,7 @@ void save_read(RDRAM_ARG PTR(void) rdram_address, uint32_t offset, uint32_t coun
+ }
+ 
+ void save_clear(uint32_t start, uint32_t size, char value) {
++    if (!recomp::save_write_allowed()) return;
+     assert(start + size < save_context.save_buffer.size());
+ 
+     {
+@@ -241,6 +244,10 @@ void read_save_file() {
+ }
+ 
+ void ultramodern::init_saving(RDRAM_ARG1) {
++    while (save_context.write_sempahore.tryWait()) {}
++    while (save_context.swap_file_pending_sempahore.tryWait()) {}
++    while (save_context.swap_file_ready_sempahore.tryWait()) {}
++
+     set_save_file_path(u8"", recomp::current_game_id());
+ 
+     save_context.save_buffer.resize(get_save_size(recomp::get_save_type()));
+@@ -264,9 +271,17 @@ void ultramodern::join_saving_thread() {
+     if (save_context.saving_thread.joinable()) {
+         save_context.saving_thread.join();
+     }
++    while (save_context.write_sempahore.tryWait()) {}
++    while (save_context.swap_file_pending_sempahore.tryWait()) {}
++    while (save_context.swap_file_ready_sempahore.tryWait()) {}
+ }
+ 
++extern "C" uint32_t g_pi_dma_calls = 0;
++extern "C" uint32_t g_pi_dma_kb = 0;
++
+ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
++    g_pi_dma_calls++;
++    g_pi_dma_kb += size >> 10;
+     // TODO asynchronous transfer
+     // TODO implement unaligned DMA correctly
+     if (direction == 0) {
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index ea17675..2576688 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -28,6 +28,8 @@
+ #ifdef _WIN32
+ #    define WIN32_LEAN_AND_MEAN
+ #    include <Windows.h>
++#elif defined(GEKKO)
++#    include <cstdlib>
+ #else
+ #    include <sys/mman.h>
+ #endif
+@@ -59,6 +61,7 @@ std::unique_ptr<recomp::mods::ModContext> mod_context = std::make_unique<recomp:
+ recomp::Version project_version;
+ // The current game's save type.
+ recomp::SaveType save_type = recomp::SaveType::None;
++static bool (*save_write_allowed_callback)() = nullptr;
+ 
+ std::u8string recomp::GameEntry::stored_filename() const {
+     return game_id + u8".z64";
+@@ -476,6 +479,10 @@ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t ar
+ 
+     recomp_func_t* func = get_function(addr);
+     func(rdram, &ctx);
++
++    if (game_entry.thread_destroy_callback != nullptr) {
++        game_entry.thread_destroy_callback(rdram, &ctx);
++    }
+ }
+ 
+ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+@@ -538,11 +545,9 @@ moodycamel::LightweightSemaphore graphics_shutdown_ready;
+ 
+ void ultramodern::quit() {
+     exited.store(true);
+-    GameStatus desired = GameStatus::None;
+-    game_status.compare_exchange_strong(desired, GameStatus::Quit);
++    ultramodern::notify_external_message_waiters();
++    game_status.store(GameStatus::Quit);
+     game_status.notify_all();
+-    std::lock_guard<std::mutex> lock(current_game_mutex);
+-    current_game.reset();
+ }
+ 
+ void recomp::mods::enable_mod(const std::string& mod_id, bool enabled) {
+@@ -717,6 +722,10 @@ bool recomp::eeprom_allowed() {
+         save_type == SaveType::AllowAll;
+ }
+ 
++bool recomp::save_write_allowed() {
++    return save_write_allowed_callback == nullptr || save_write_allowed_callback();
++}
++
+ bool recomp::sram_allowed() {
+     return
+         save_type == SaveType::Sram || 
+@@ -730,7 +739,12 @@ bool recomp::flashram_allowed() {
+ }
+ 
+ void recomp::start(const recomp::Configuration& cfg) {
++    exited.store(false);
++    while (graphics_shutdown_ready.tryWait()) {}
++    ultramodern::reset_external_message_state();
++
+     project_version = cfg.project_version;
++    save_write_allowed_callback = cfg.save_write_allowed_callback;
+     recomp::check_all_stored_roms();
+ 
+     recomp::rsp::set_callbacks(cfg.rsp_callbacks);
+@@ -780,6 +794,12 @@ void recomp::start(const recomp::Configuration& cfg) {
+             VirtualFree(rdram, 0, MEM_RELEASE);
+         }
+     }
++#elif defined(GEKKO)
++    // On Wii (24MB MEM1 + 64MB MEM2), N64 RDRAM (8MB) + buffers fit in MEM2.
++    // Allocate 16MB aligned buffer for RDRAM and extended area.
++    constexpr size_t wii_rdram_size = 16 * 1024 * 1024;
++    rdram = reinterpret_cast<uint8_t*>(std::calloc(1, wii_rdram_size));
++    alloc_failed = (rdram == nullptr);
+ #else
+     rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
+@@ -825,14 +845,25 @@ void recomp::start(const recomp::Configuration& cfg) {
+ 
+     game_thread.join();
+     ultramodern::join_event_threads();
++    ultramodern::join_timer_thread();
+     ultramodern::join_thread_cleaner_thread();
+     ultramodern::join_saving_thread();
++
++    game_status.store(GameStatus::None);
++    game_status.notify_all();
++    {
++        std::lock_guard<std::mutex> lock(current_game_mutex);
++        current_game.reset();
++    }
+     
+     // Free rdram.
+     bool free_failed;
+ #ifdef _WIN32
+     // VirtualFree returns zero on failure.
+     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
++#elif defined(GEKKO)
++    std::free(rdram);
++    free_failed = false;
+ #else
+     // munmap returns -1 on failure.
+     free_failed = (munmap(rdram, allocation_size) == -1);
+diff --git a/librecomp/src/sp.cpp b/librecomp/src/sp.cpp
+index ae0f44f..74b2473 100644
+--- a/librecomp/src/sp.cpp
++++ b/librecomp/src/sp.cpp
+@@ -9,13 +9,17 @@ extern "C" void osSpTaskLoad_recomp(uint8_t* rdram, recomp_context* ctx) {
+ 
+ bool dump_frame = false;
+ 
++extern "C" uint32_t g_sp_calls;
++extern "C" uint32_t g_sp_gfx_tasks;
++extern "C" uint32_t g_sp_aud_tasks;
++
+ extern "C" void osSpTaskStartGo_recomp(uint8_t* rdram, recomp_context* ctx) {
+-    //printf("[sp] osSpTaskStartGo(0x%08X)\n", (uint32_t)ctx->r4);
++    g_sp_calls++;
+     OSTask* task = TO_PTR(OSTask, ctx->r4);
+     if (task->t.type == M_GFXTASK) {
+-        //printf("[sp] Gfx task: %08X\n", (uint32_t)ctx->r4);
++        g_sp_gfx_tasks++;
+     } else if (task->t.type == M_AUDTASK) {
+-        //printf("[sp] Audio task: %08X\n", (uint32_t)ctx->r4);
++        g_sp_aud_tasks++;
+     }
+     // For debugging
+     if (dump_frame) {
+@@ -27,7 +31,7 @@ extern "C" void osSpTaskStartGo_recomp(uint8_t* rdram, recomp_context* ctx) {
+         std::ofstream dump_file{ "ramdump" + std::string{ addr_str } + ".bin", std::ios::binary};
+ 
+         for (size_t i = 0; i < ram_size; i++) {
+-            ram_unswapped[i] = rdram[i ^ 3];
++            ram_unswapped[i] = rdram[i ^ RECOMP_BYTE_XOR];
+         }
+ 
+         dump_file.write(ram_unswapped.get(), ram_size);
+diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
+index e0d367e..0ab650a 100644
+--- a/librecomp/src/ultra_translation.cpp
++++ b/librecomp/src/ultra_translation.cpp
+@@ -3,6 +3,11 @@
+ #include <ultramodern/ultramodern.hpp>
+ #include "recomp.h"
+ 
++extern "C" u32 g_threads_created = 0;
++extern "C" u32 g_threads_started = 0;
++extern "C" u32 g_recv_mesg_calls = 0;
++extern "C" u32 g_send_mesg_calls = 0;
++
+ extern "C" void osInitialize_recomp(uint8_t * rdram, recomp_context * ctx) {
+     osInitialize();
+ }
+@@ -12,11 +17,13 @@ extern "C" void __osInitialize_common_recomp(uint8_t * rdram, recomp_context * c
+ }
+ 
+ extern "C" void osCreateThread_recomp(uint8_t* rdram, recomp_context* ctx) {
++    g_threads_created++;
+     osCreateThread(rdram, (int32_t)ctx->r4, (OSId)ctx->r5, (int32_t)ctx->r6, (int32_t)ctx->r7,
+         (int32_t)MEM_W(0x10, ctx->r29), (OSPri)MEM_W(0x14, ctx->r29));
+ }
+ 
+ extern "C" void osStartThread_recomp(uint8_t* rdram, recomp_context* ctx) {
++    g_threads_started++;
+     osStartThread(rdram, (int32_t)ctx->r4);
+ }
+ 
+@@ -50,10 +57,12 @@ extern "C" void osCreateMesgQueue_recomp(uint8_t* rdram, recomp_context* ctx) {
+ }
+ 
+ extern "C" void osRecvMesg_recomp(uint8_t* rdram, recomp_context* ctx) {
++    g_recv_mesg_calls++;
+     ctx->r2 = osRecvMesg(rdram, (int32_t)ctx->r4, (int32_t)ctx->r5, (s32)ctx->r6);
+ }
+ 
+ extern "C" void osSendMesg_recomp(uint8_t* rdram, recomp_context* ctx) {
++    g_send_mesg_calls++;
+     ctx->r2 = osSendMesg(rdram, (int32_t)ctx->r4, (OSMesg)ctx->r5, (s32)ctx->r6);
+ }
+ 
+diff --git a/thirdparty/concurrentqueue/concurrentqueue.h b/thirdparty/concurrentqueue/concurrentqueue.h
+index bcb06a1..654f13b 100644
+--- a/thirdparty/concurrentqueue/concurrentqueue.h
++++ b/thirdparty/concurrentqueue/concurrentqueue.h
+@@ -79,6 +79,12 @@
+ #include <thread>		// partly for __WINPTHREADS_VERSION if on MinGW-w64 w/ POSIX threading
+ #include <mutex>        // used for thread exit synchronization
+ 
++#if defined(GEKKO)
++// libogc : `thread_local`/`__thread` est partage entre tous les threads (une seule instance). L'identifiant "adresse d'une variable locale au thread"
++// est alors le meme pour tous les threads : plusieurs threads partagent le meme producteur implicite -> file corrompue (plantages DSI, blocages).
++// On utilise donc std::this_thread::get_id() et on desactive le support thread_local.
++#define MOODYCAMEL_NO_THREAD_LOCAL 1
++#endif
+ // Platform-specific definitions of a numeric thread ID type and an invalid value
+ namespace moodycamel { namespace details {
+ 	template<typename thread_id_t> struct thread_id_converter {
+@@ -217,7 +223,7 @@ namespace moodycamel { namespace details {
+ // VS2013 doesn't support `thread_local`, and MinGW-w64 w/ POSIX threading has a crippling bug: http://sourceforge.net/p/mingw-w64/bugs/445
+ // g++ <=4.7 doesn't support thread_local either.
+ // Finally, iOS/ARM doesn't have support for it either, and g++/ARM allows it to compile but it's unconfirmed to actually work
+-#if (!defined(_MSC_VER) || _MSC_VER >= 1900) && (!defined(__MINGW32__) && !defined(__MINGW64__) || !defined(__WINPTHREADS_VERSION)) && (!defined(__GNUC__) || __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)) && (!defined(__APPLE__) || !TARGET_OS_IPHONE) && !defined(__arm__) && !defined(_M_ARM) && !defined(__aarch64__)
++#if (!defined(_MSC_VER) || _MSC_VER >= 1900) && (!defined(__MINGW32__) && !defined(__MINGW64__) || !defined(__WINPTHREADS_VERSION)) && (!defined(__GNUC__) || __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)) && (!defined(__APPLE__) || !TARGET_OS_IPHONE) && !defined(GEKKO) && !defined(__arm__) && !defined(_M_ARM) && !defined(__aarch64__)
+ // Assume `thread_local` is fully supported in all other C++11 compilers/platforms
+ #define MOODYCAMEL_CPP11_THREAD_LOCAL_SUPPORTED    // tentatively enabled for now; years ago several users report having problems with it on
+ #endif
+diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
+index 41ba094..14f6b2d 100644
+--- a/thirdparty/concurrentqueue/lightweightsemaphore.h
++++ b/thirdparty/concurrentqueue/lightweightsemaphore.h
+@@ -24,6 +24,8 @@ extern "C" {
+ }
+ #elif defined(__MACH__)
+ #include <mach/mach.h>
++#elif defined(GEKKO)
++#include <ogc/semaphore.h>
+ #elif defined(__unix__)
+ #include <semaphore.h>
+ 
+@@ -253,6 +255,70 @@ public:
+ 		}
+ 	}
+ };
++#elif defined(GEKKO)
++class Semaphore
++{
++private:
++	sem_t m_sema;
++
++	Semaphore(const Semaphore& other);
++	Semaphore& operator=(const Semaphore& other);
++
++public:
++	Semaphore(int initialAvailableCount = 0)
++	{
++		assert(initialAvailableCount >= 0);
++		LWP_SemInit(&m_sema, initialAvailableCount, 0x7FFFFFFF);
++	}
++
++	~Semaphore()
++	{
++		LWP_SemDestroy(m_sema);
++	}
++
++	bool wait()
++	{
++		return LWP_SemWait(m_sema) == 0;
++	}
++
++	bool try_wait()
++	{
++		u32 val = 0;
++		if (LWP_SemGetValue(m_sema, &val) == 0 && val > 0) {
++			return LWP_SemWait(m_sema) == 0;
++		}
++		return false;
++	}
++
++	bool timed_wait(std::uint64_t usecs)
++	{
++		if (try_wait()) return true;
++		if (usecs == 0) return false;
++
++		std::uint64_t remaining = usecs;
++		while (remaining > 0) {
++			std::uint64_t step = (remaining > 100) ? 100 : remaining;
++			usleep(step);
++			if (try_wait()) return true;
++			if (remaining <= step) break;
++			remaining -= step;
++		}
++		return false;
++	}
++
++	void signal()
++	{
++		LWP_SemPost(m_sema);
++	}
++
++	void signal(int count)
++	{
++		while (count-- > 0)
++		{
++			LWP_SemPost(m_sema);
++		}
++	}
++};
+ #else
+ #error Unsupported platform! (No semaphore wrapper available)
+ #endif
+@@ -346,7 +412,12 @@ private:
+ 	}
+ 
+ public:
++#if defined(GEKKO)
++	// Un seul coeur : tourner en boucle avant de bloquer empeche le thread qu'on attend de s'executer (le thread N64 suivant). Pas d'attente active.
++	LightweightSemaphore(ssize_t initialCount = 0, int maxSpins = 0) : m_count(initialCount), m_maxSpins(0)
++#else
+ 	LightweightSemaphore(ssize_t initialCount = 0, int maxSpins = 10000) : m_count(initialCount), m_maxSpins(maxSpins)
++#endif
+ 	{
+ 		assert(initialCount >= 0);
+ 		assert(maxSpins >= 0);
+diff --git a/ultramodern/CMakeLists.txt b/ultramodern/CMakeLists.txt
+index 5593172..99a432c 100644
+--- a/ultramodern/CMakeLists.txt
++++ b/ultramodern/CMakeLists.txt
+@@ -30,11 +30,15 @@ target_include_directories(ultramodern PUBLIC
+     "${PROJECT_SOURCE_DIR}/../thirdparty/sse2neon"
+ )
+ 
+-target_compile_options(ultramodern PRIVATE
+-#    -Wall
+-#    -Wextra
+-    -Wno-unused-parameter
+-)
++if (MSVC)
++    target_compile_options(ultramodern PRIVATE /wd4100)
++else()
++    target_compile_options(ultramodern PRIVATE
++    #    -Wall
++    #    -Wextra
++        -Wno-unused-parameter
++    )
++endif()
+ 
+ if (WIN32)
+     add_compile_definitions(NOMINMAX)
+diff --git a/ultramodern/include/ultramodern/events.hpp b/ultramodern/include/ultramodern/events.hpp
+index dbb2ea5..d6fa238 100644
+--- a/ultramodern/include/ultramodern/events.hpp
++++ b/ultramodern/include/ultramodern/events.hpp
+@@ -1,11 +1,15 @@
+ #ifndef __EVENTS_HPP__
+ #define __EVENTS_HPP__
+ 
++#include <cstdint>
++
+ namespace ultramodern {
+     namespace events {
+         struct callbacks_t {
+             using vi_callback_t = void();
+             using gfx_init_callback_t = void();
++            using authored_simulation_pacing_scale_milli_callback_t = std::uint32_t();
++            using presentation_allowed_callback_t = bool();
+ 
+             /**
+              * Called in each VI.
+@@ -16,6 +20,19 @@ namespace ultramodern {
+              * Called before entering the gfx main loop.
+              */
+             gfx_init_callback_t* gfx_init_callback;
++
++            /**
++             * Returns the client-authored simulation pacing scale in
++             * thousandths. 1000 preserves the game's normal VI cadence.
++             */
++            authored_simulation_pacing_scale_milli_callback_t*
++                authored_simulation_pacing_scale_milli_callback;
++
++            /**
++             * Sampled when an authored graphics task is submitted. Rollback
++             * replay still completes SP/DP but must not reach the renderer.
++             */
++            presentation_allowed_callback_t* presentation_allowed_callback;
+         };
+ 
+         void set_callbacks(const callbacks_t& callbacks);
+diff --git a/ultramodern/include/ultramodern/input.hpp b/ultramodern/include/ultramodern/input.hpp
+index 1dab1b8..eb774a3 100644
+--- a/ultramodern/include/ultramodern/input.hpp
++++ b/ultramodern/include/ultramodern/input.hpp
+@@ -3,6 +3,8 @@
+ 
+ #include <cstdint>
+ 
++typedef struct recomp_context recomp_context;
++
+ namespace ultramodern {
+     namespace input {
+         enum class Device {
+@@ -26,11 +28,15 @@ namespace ultramodern {
+ 
+         struct callbacks_t {
+             using poll_input_t = void(void);
++            using frame_boundary_t = void(uint8_t* rdram, recomp_context* context);
++            using physical_poll_allowed_t = bool(void);
+             using get_input_t = bool(int controller_num, uint16_t* buttons, float* x, float* y);
+             using set_rumble_t = void(int controller_num, bool rumble);
+             using get_connected_device_info_t = connected_device_info_t(int controller_num);
+ 
+             poll_input_t* poll_input;
++            frame_boundary_t* frame_boundary;
++            physical_poll_allowed_t* physical_poll_allowed;
+ 
+             /**
+              * Requests the state of the pressed buttons and the analog stick for the given `controller_num`.
+@@ -57,6 +63,9 @@ namespace ultramodern {
+         };
+ 
+         void set_callbacks(const callbacks_t& callbacks);
++        void prepare_input_read();
++        void complete_input_read();
++        void notify_frame_boundary(uint8_t* rdram, recomp_context* context);
+     }
+ }
+ 
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index 43032ea..0d8d5f4 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -62,6 +62,8 @@ namespace ultramodern {
+             void* view;
+             auto operator<=>(const WindowHandle&) const = default;
+         };
++#elif defined(GEKKO)
++        using WindowHandle = void*;
+ #endif
+ 
+         enum class SetupResult {
+@@ -83,7 +85,7 @@ namespace ultramodern {
+                 virtual bool update_config(const GraphicsConfig& old_config, const GraphicsConfig& new_config) = 0;
+ 
+                 virtual void enable_instant_present() = 0;
+-                virtual void send_dl(const OSTask* task) = 0;
++                virtual void send_dl(const OSTask* task, uint8_t* rdram_snapshot) = 0;
+                 virtual void update_screen() = 0;
+                 virtual void shutdown() = 0;
+                 virtual uint32_t get_display_framerate() const = 0;
+diff --git a/ultramodern/include/ultramodern/ultra64.h b/ultramodern/include/ultramodern/ultra64.h
+index 31eb106..0e42e34 100644
+--- a/ultramodern/include/ultramodern/ultra64.h
++++ b/ultramodern/include/ultramodern/ultra64.h
+@@ -39,7 +39,11 @@ typedef uint8_t u8;
+ #  define RDRAM_ARG1 uint8_t *rdram
+ #  define PASS_RDRAM rdram, 
+ #  define PASS_RDRAM1 rdram
+-#  define TO_PTR(type, var) ((type*)(&rdram[(uint64_t)var - 0xFFFFFFFF80000000]))
++#  if defined(GEKKO)
++#    define TO_PTR(type, var) ((type*)(&rdram[((uint32_t)(var)) & 0x00FFFFFF]))
++#  else
++#    define TO_PTR(type, var) ((type*)(&rdram[(uint64_t)var - 0xFFFFFFFF80000000]))
++#  endif
+ #  define GET_MEMBER(type, addr, member) (addr + (intptr_t)&(((type*)nullptr)->member))
+ #  ifdef __cplusplus
+ #    define NULLPTR (PTR(void))0
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 46aea61..37d197e 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -73,7 +73,10 @@ struct MessageQueueControl {
+ };
+ void set_message_queue_control(const MessageQueueControl& mqc);
+ void enqueue_external_message_src(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src);
++bool enqueue_external_message_src_and_wait(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src);
++void acknowledge_external_message_src(EventMessageSource src);
+ void enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool requeue_if_blocked);
++void notify_external_message_waiters();
+ void wait_for_external_message(RDRAM_ARG1);
+ void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
+ 
+@@ -96,6 +99,9 @@ enum class ThreadPriority {
+ void set_native_thread_name(const std::string& name);
+ void set_native_thread_priority(ThreadPriority pri);
+ PTR(OSThread) this_thread();
++#if defined(GEKKO)
++void set_current_n64_thread(PTR(OSThread) t);
++#endif
+ void set_entrypoint_thread();
+ bool is_entrypoint_thread();
+ bool is_game_thread();
+@@ -126,9 +132,11 @@ struct audio_callbacks_t {
+     using queue_samples_t = void(int16_t*, size_t);
+     using get_samples_remaining_t = size_t();
+     using set_frequency_t = void(uint32_t);
++    using external_work_allowed_t = bool(void);
+     queue_samples_t* queue_samples;
+     get_samples_remaining_t* get_frames_remaining;
+     set_frequency_t* set_frequency;
++    external_work_allowed_t* external_work_allowed;
+ };
+ 
+ // TODO: Most of the members of this struct are not used by ultramodern. Should we move them to librecomp instead?
+@@ -145,6 +153,8 @@ struct gfx_callbacks_t {
+ 
+ bool is_game_started();
+ void quit();
++void reset_external_message_state();
++void join_timer_thread();
+ void join_event_threads();
+ void join_thread_cleaner_thread();
+ void join_saving_thread();
+diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
+index 3198be0..758f4d8 100644
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -16,7 +16,10 @@ void ultramodern::init_audio() {
+ }
+ 
+ void ultramodern::set_audio_frequency(uint32_t freq) {
+-    if (audio_callbacks.set_frequency) {
++    const bool external_work_allowed =
++        audio_callbacks.external_work_allowed == nullptr ||
++        audio_callbacks.external_work_allowed();
++    if (external_work_allowed && audio_callbacks.set_frequency) {
+         audio_callbacks.set_frequency(freq);
+     }
+     sample_rate = freq;
+@@ -30,7 +33,10 @@ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_
+     uint32_t sample_count = byte_count / sizeof(int16_t);
+ 
+     // Queue the swapped audio data.
+-    if (sample_count > 0 && audio_callbacks.queue_samples) {
++    const bool external_work_allowed =
++        audio_callbacks.external_work_allowed == nullptr ||
++        audio_callbacks.external_work_allowed();
++    if (external_work_allowed && sample_count > 0 && audio_callbacks.queue_samples) {
+         audio_callbacks.queue_samples(TO_PTR(int16_t, audio_data_), sample_count);
+     }
+ }
+@@ -44,6 +50,13 @@ float buffer_offset_frames = 0.5f;
+ // the remaining sample count and reporting a number that's too high here can lead to issues.
+ // Reporting a number that's too low can lead to audio lag in some games.
+ uint32_t ultramodern::get_remaining_audio_bytes() {
++    const bool external_work_allowed =
++        audio_callbacks.external_work_allowed == nullptr ||
++        audio_callbacks.external_work_allowed();
++    if (!external_work_allowed) {
++        return 0;
++    }
++
+     // Get the number of remaining buffered audio bytes.
+     uint32_t buffered_byte_count;
+     if (audio_callbacks.get_frames_remaining != nullptr) {
+diff --git a/ultramodern/src/error_handling.cpp b/ultramodern/src/error_handling.cpp
+index 8ca779e..259f5c0 100644
+--- a/ultramodern/src/error_handling.cpp
++++ b/ultramodern/src/error_handling.cpp
+@@ -21,7 +21,7 @@ void ultramodern::error_handling::message_box(const char* msg) {
+ void ultramodern::error_handling::quick_exit(const char* filename, int line, const char *func, int exit_status) {
+     fprintf(stderr, "Exiting with exit status '%i'. Function %s, at file %s:%i\n", exit_status, func, filename, line);
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(GEKKO)
+     std::_Exit(exit_status);
+ #else
+     std::quick_exit(exit_status);
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 518529d..da41b36 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -6,6 +6,7 @@
+ #include <unordered_map>
+ #include <utility>
+ #include <mutex>
++#include <memory>
+ #include <queue>
+ #include <cstring>
+ 
+@@ -19,6 +20,7 @@
+ #include "ultramodern/renderer_context.hpp"
+ 
+ static ultramodern::events::callbacks_t events_callbacks{};
++static std::atomic_bool screen_update_action_pending = false;
+ 
+ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t& callbacks) {
+     events_callbacks = callbacks;
+@@ -26,6 +28,8 @@ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t&
+ 
+ struct SpTaskAction {
+     OSTask task;
++    std::unique_ptr<uint8_t[]> rdram_snapshot;
++    bool presentation_allowed;
+ };
+ 
+ struct ScreenUpdateAction {
+@@ -159,12 +163,20 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
+     }
+ }
+ 
++extern "C" uint32_t g_vi_set_event_calls = 0;
++extern "C" uint32_t g_vi_events_enqueued = 0;
++
+ extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 retrace_count) {
++    g_vi_set_event_calls++;
+     std::lock_guard lock{ events_context.message_mutex };
+     ViState* next_state = events_context.vi.get_next_state();
+     next_state->mq = mq_;
+     next_state->msg = msg;
+     next_state->retrace_count = retrace_count;
++    ViState* cur_state = events_context.vi.get_cur_state();
++    cur_state->mq = mq_;
++    cur_state->msg = msg;
++    cur_state->retrace_count = retrace_count;
+ }
+ 
+ uint64_t total_vis = 0;
+@@ -175,14 +187,21 @@ extern moodycamel::LightweightSemaphore graphics_shutdown_ready;
+ 
+ void set_dummy_vi(bool odd);
+ 
++#if defined(GEKKO)
++extern "C" void dkr_name_thread(const char* name);
++#endif
+ void vi_thread_func() {
++#if defined(GEKKO)
++    dkr_name_thread("vi");
++#endif
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows
+     // the game to generate new audio and gfx lists.
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Critical);
+     using namespace std::chrono_literals;
+ 
+-    int remaining_retraces = 1;
++    std::uint32_t authored_vi_phase_milli = 0U;
++    int authored_vi_retrace_count = 0;
+ 
+     while (!exited) {
+         // Determine the next VI time (more accurate than adding 16ms each VI interrupt)
+@@ -214,28 +233,56 @@ void vi_thread_func() {
+             static bool odd = false;
+             set_dummy_vi(odd);
+             odd = !odd;
++            authored_vi_phase_milli = 0U;
++            authored_vi_retrace_count = 0;
+         }
+ 
+         // Queue a screen update for the graphics thread with the current VI register state.
+         // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
+-        events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++        // A 30 Hz renderer does not need an unbounded queue of identical 60 Hz
++        // presents. Keep at most one pending update so graphics tasks cannot
++        // age behind stale screen-update work.
++        if (!screen_update_action_pending.exchange(true)) {
++            events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++        }
+ 
+         // Update VI registers and swap VI modes.
+         events_context.vi.update_vi();
+ 
+         // If the game has started, handle sending VI and AI events.
+         if (ultramodern::is_game_started()) {
+-            remaining_retraces--;
+-            
+             std::lock_guard lock{ events_context.message_mutex };
+             ViState* cur_state = events_context.vi.get_cur_state();
+-            if (remaining_retraces == 0) {
++            const int retrace_count = cur_state->retrace_count > 0
++                ? cur_state->retrace_count
++                : 1;
++            if (authored_vi_retrace_count != retrace_count) {
++                authored_vi_retrace_count = retrace_count;
++                // Preserve the original first-VI delivery when the authored
++                // retrace cadence is installed or changes.
++                authored_vi_phase_milli =
++                    static_cast<std::uint32_t>(retrace_count - 1) * 1000U;
++            }
++
++            std::uint32_t pacing_scale_milli = 1000U;
++            if (events_callbacks.authored_simulation_pacing_scale_milli_callback != nullptr) {
++                pacing_scale_milli =
++                    events_callbacks.authored_simulation_pacing_scale_milli_callback();
++            }
++            pacing_scale_milli = pacing_scale_milli < 1000U
++                ? 1000U
++                : (pacing_scale_milli > 1333U ? 1333U : pacing_scale_milli);
++            authored_vi_phase_milli += pacing_scale_milli;
++            const std::uint32_t authored_vi_threshold_milli =
++                static_cast<std::uint32_t>(retrace_count) * 1000U;
++            if (authored_vi_phase_milli >= authored_vi_threshold_milli) {
+                 if (cur_state->mq != NULLPTR) {
+                     // Send a message to the VI queue, and do not set it to be requeued if the queue was full.
+                     // The worst case scenario is that the game misses a VI message and has to wait a little longer for the next. 
++                    g_vi_events_enqueued++;
+                     ultramodern::enqueue_external_message_src(cur_state->mq, cur_state->msg, false, ultramodern::EventMessageSource::Vi);
+                 }
+-                remaining_retraces = cur_state->retrace_count;
++                authored_vi_phase_milli -= authored_vi_threshold_milli;
+             }
+             if (events_context.ai.mq != NULLPTR) {
+                 // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
+@@ -250,9 +297,17 @@ void vi_thread_func() {
+ }
+ 
+ void sp_complete() {
+-    uint8_t* rdram = events_context.rdram;
+-    std::lock_guard lock{ events_context.message_mutex };
+-    ultramodern::enqueue_external_message_src(events_context.sp.mq, events_context.sp.msg, false, ultramodern::EventMessageSource::Sp);
++    PTR(OSMesgQueue) mq;
++    OSMesg msg;
++    {
++        std::lock_guard lock{ events_context.message_mutex };
++        mq = events_context.sp.mq;
++        msg = events_context.sp.msg;
++    }
++    // Do not publish the later DP edge until the SP edge has actually entered
++    // the game's scheduler queue. Merely placing both edges in the host queue
++    // allows a fast renderer to outrun the emulated scheduler.
++    (void)ultramodern::enqueue_external_message_src_and_wait(mq, msg, false, ultramodern::EventMessageSource::Sp);
+ }
+ 
+ void dp_complete() {
+@@ -262,6 +317,9 @@ void dp_complete() {
+ }
+ 
+ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
++#if defined(GEKKO)
++    dkr_name_thread("task");
++#endif
+     ultramodern::set_native_thread_name("SP Task Thread");
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
+ 
+@@ -320,6 +378,9 @@ std::atomic<ultramodern::renderer::SetupResult> renderer_setup_result = ultramod
+ std::atomic<ultramodern::renderer::GraphicsApi> renderer_chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+ 
+ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready, ultramodern::renderer::WindowHandle window_handle) {
++#if defined(GEKKO)
++    dkr_name_thread("gfx");
++#endif
+     bool enabled_instant_present = false;
+     using namespace std::chrono_literals;
+ 
+@@ -353,33 +414,47 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+         if (events_context.action_queue.wait_dequeue_timed(action, 1ms)) {
+             // Determine the action type and act on it
+             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
+-                // Turn on instant present if the game has been started and it hasn't been turned on yet.
+-                if (ultramodern::is_game_started() && !enabled_instant_present) {
+-                    renderer_context->enable_instant_present();
+-                    enabled_instant_present = true;
+-                }
+-                // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
+-                // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
+-                // is finished as well, so sending this early shouldn't be an issue in most cases.
+-                // If this causes issues then the logic can be replaced with responding to yield requests.
++                // The queued task owns an immutable RDRAM snapshot, so the CPU
++                // can safely recycle its live display-list buffers as soon as
++                // the emulated RSP completes. Deliver this edge before parsing
++                // to keep SP and DP interrupts from racing back-to-back through
++                // games such as DKR that schedule their next task on SP.
++#if !defined(GEKKO)
+                 sp_complete();
+-                ultramodern::measure_input_latency();
+-
+-                PTR(u64) displaylist = task_action->task.t.data_ptr;
+-                ultramodern::extensions::on_displaylist_submitted(displaylist);
+-
+-                [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
+-                renderer_context->send_dl(&task_action->task);
+-                [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
++#endif
++
++                if (task_action->presentation_allowed) {
++                    // Turn on instant present if the game has been started and it hasn't been turned on yet.
++                    if (ultramodern::is_game_started() && !enabled_instant_present) {
++                        renderer_context->enable_instant_present();
++                        enabled_instant_present = true;
++                    }
++                    ultramodern::measure_input_latency();
++                    PTR(u64) displaylist = task_action->task.t.data_ptr;
++                    ultramodern::extensions::on_displaylist_submitted(displaylist);
++
++                    [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
++#if defined(GEKKO)
++                    renderer_context->send_dl(&task_action->task, rdram);
++#else
++                    renderer_context->send_dl(&task_action->task, task_action->rdram_snapshot.get());
++#endif
++                    [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
++                    ultramodern::extensions::on_displaylist_parsed(displaylist);
++                    ultramodern::extensions::on_displaylist_completed(displaylist);
++                }
+ 
++#if defined(GEKKO)
++                sp_complete();
++                // SP puis DP separes d'un court delai (comme sur le materiel) : evite que le scheduler du jeu recoive les deux d'un coup.
++                std::this_thread::sleep_for(std::chrono::milliseconds{1});
++#endif
+                 dp_complete();
+-                // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+-                ultramodern::extensions::on_displaylist_parsed(displaylist);
+-                ultramodern::extensions::on_displaylist_completed(displaylist);
+                 // printf("Renderer ProcessDList time: %d us\n", static_cast<u32>(std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count()));
+             }
+             else if (const auto* screen_update_action = std::get_if<ScreenUpdateAction>(&action)) {
+                 events_context.vi.update_screen_regs = screen_update_action->regs;
++                screen_update_action_pending.store(false);
+                 renderer_context->update_screen();
+                 display_refresh_rate = renderer_context->get_display_framerate();
+                 resolution_scale = renderer_context->get_resolution_scale();
+@@ -557,10 +632,42 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+ 
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+-        events_context.action_queue.enqueue(SpTaskAction{ *task });
++        const bool presentation_allowed =
++            events_callbacks.presentation_allowed_callback == nullptr ||
++            events_callbacks.presentation_allowed_callback();
++        if (!presentation_allowed) {
++            // Historical/catch-up frames do not reach the renderer, but their
++            // emulated graphics task must retain the normal worker-owned SP/DP
++            // lifecycle. Completing both edges inline can publish DP before
++            // DKR has entered gfxtask_wait, permanently losing the completion.
++            // No RDRAM snapshot is needed because the worker skips display-list
++            // parsing whenever presentation_allowed is false.
++            events_context.action_queue.enqueue(SpTaskAction{
++                *task, std::unique_ptr<uint8_t[]>{}, false });
++            return;
++        }
++#if defined(GEKKO)
++        // Wii : pas de copie de 8 Mo de RDRAM par image (80 % du CPU !) : le thread graphique lit la RDRAM vivante et ne signale la fin
++        // de la tache (SP puis DP) qu'APRES l'analyse de la display list, donc le jeu ne recycle pas ses tampons avant.
++        events_context.action_queue.enqueue(SpTaskAction{
++            *task, std::unique_ptr<uint8_t[]>{}, true });
++#else
++        constexpr size_t RDRAMSnapshotSize = 0x800000;
++        auto rdram_snapshot = std::make_unique<uint8_t[]>(RDRAMSnapshotSize);
++        std::memcpy(rdram_snapshot.get(), rdram, RDRAMSnapshotSize);
++        events_context.action_queue.enqueue(SpTaskAction{
++            *task, std::move(rdram_snapshot), true });
++#endif
+     }
+     // Set all other tasks as the RSP task
+     else {
++        const bool external_work_allowed =
++            events_callbacks.presentation_allowed_callback == nullptr ||
++            events_callbacks.presentation_allowed_callback();
++        if (task->t.type == M_AUDTASK && !external_work_allowed) {
++            sp_complete();
++            return;
++        }
+         events_context.sp_task_queue.enqueue(task);
+     }
+ }
+@@ -569,9 +676,46 @@ void ultramodern::send_si_message() {
+     ultramodern::enqueue_external_message_src(events_context.si.mq, events_context.si.msg, false, ultramodern::EventMessageSource::Si);
+ }
+ 
++static void reset_event_state() {
++    Action action;
++    while (events_context.action_queue.try_dequeue(action)) {}
++
++    OSTask* task = nullptr;
++    while (events_context.sp_task_queue.try_dequeue(task)) {}
++
++    OSThread* deleted_thread = nullptr;
++    while (events_context.deleted_threads.try_dequeue(deleted_thread)) {}
++
++    {
++        std::lock_guard lock{ events_context.message_mutex };
++        events_context.vi.cur_state = 0;
++        events_context.vi.field = 0;
++        events_context.vi.states[0] = ViState{};
++        events_context.vi.states[1] = ViState{};
++        events_context.vi.regs = {};
++        events_context.vi.update_screen_regs = {};
++        events_context.sp.mq = NULLPTR;
++        events_context.sp.msg = (OSMesg)0;
++        events_context.dp.mq = NULLPTR;
++        events_context.dp.msg = (OSMesg)0;
++        events_context.ai.mq = NULLPTR;
++        events_context.ai.msg = (OSMesg)0;
++        events_context.si.mq = NULLPTR;
++        events_context.si.msg = (OSMesg)0;
++    }
++
++    screen_update_action_pending.store(false);
++    total_vis = 0;
++    display_refresh_rate.store(60);
++    resolution_scale.store(1.0f);
++    renderer_setup_result.store(ultramodern::renderer::SetupResult::Success);
++    renderer_chosen_api.store(ultramodern::renderer::GraphicsApi::Auto);
++}
++
+ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
+     moodycamel::LightweightSemaphore gfx_thread_ready;
+     moodycamel::LightweightSemaphore task_thread_ready;
++    reset_event_state();
+     events_context.rdram = rdram;
+     events_context.sp.gfx_thread = std::thread{ gfx_thread_func, rdram, &gfx_thread_ready, window_handle };
+     events_context.sp.task_thread = std::thread{ task_thread_func, rdram, &task_thread_ready };
+@@ -613,10 +757,21 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+ }
+ 
+ void ultramodern::join_event_threads() {
+-    events_context.sp.gfx_thread.join();
+-    events_context.vi.thread.join();
++    if (events_context.sp.gfx_thread.joinable()) {
++        events_context.sp.gfx_thread.join();
++    }
++    if (events_context.vi.thread.joinable()) {
++        events_context.vi.thread.join();
++    }
+ 
+     // Send a null RSP task to indicate that the RSP task thread should exit.
+-    events_context.sp_task_queue.enqueue(nullptr);
+-    events_context.sp.task_thread.join();
++    if (events_context.sp.task_thread.joinable()) {
++        events_context.sp_task_queue.enqueue(nullptr);
++        events_context.sp.task_thread.join();
++    }
++
++    Action action;
++    while (events_context.action_queue.try_dequeue(action)) {}
++    OSTask* task = nullptr;
++    while (events_context.sp_task_queue.try_dequeue(task)) {}
+ }
+diff --git a/ultramodern/src/input.cpp b/ultramodern/src/input.cpp
+index 8e86cb1..f418e49 100644
+--- a/ultramodern/src/input.cpp
++++ b/ultramodern/src/input.cpp
+@@ -21,12 +21,33 @@ void ultramodern::input::set_callbacks(const callbacks_t& callbacks) {
+     input_callbacks = callbacks;
+ }
+ 
++void ultramodern::input::notify_frame_boundary(uint8_t* rdram,
++                                                recomp_context* context) {
++    if (input_callbacks.frame_boundary != nullptr) {
++        input_callbacks.frame_boundary(rdram, context);
++    }
++}
++
+ static std::chrono::high_resolution_clock::time_point input_poll_time;
+ 
+ static void update_poll_time() {
+     input_poll_time = std::chrono::high_resolution_clock::now();
+ }
+ 
++void ultramodern::input::prepare_input_read() {
++    const bool physical_poll_allowed =
++        input_callbacks.physical_poll_allowed == nullptr ||
++        input_callbacks.physical_poll_allowed();
++    if (physical_poll_allowed && input_callbacks.poll_input != nullptr) {
++        input_callbacks.poll_input();
++    }
++    update_poll_time();
++}
++
++void ultramodern::input::complete_input_read() {
++    ultramodern::send_si_message();
++}
++
+ void ultramodern::measure_input_latency() {
+ #if 0
+     printf("Delta: %ld micros\n", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - input_poll_time));
+@@ -115,12 +136,8 @@ extern "C" s32 osContStartQuery(RDRAM_ARG PTR(OSMesgQueue) mq) {
+ }
+ 
+ extern "C" s32 osContStartReadData(RDRAM_ARG PTR(OSMesgQueue) mq) {
+-    if (input_callbacks.poll_input != nullptr) {
+-        input_callbacks.poll_input();
+-    }
+-    update_poll_time();
+-
+-    ultramodern::send_si_message();
++    ultramodern::input::prepare_input_read();
++    ultramodern::input::complete_input_read();
+ 
+     return 0;
+ }
+@@ -205,7 +222,10 @@ s32 __osMotorAccess(RDRAM_ARG PTR(OSPfs) pfs_, s32 flag) {
+         return PFS_ERR_INVALID;
+     }
+ 
+-    if (input_callbacks.set_rumble != nullptr) {
++    const bool physical_output_allowed =
++        input_callbacks.physical_poll_allowed == nullptr ||
++        input_callbacks.physical_poll_allowed();
++    if (physical_output_allowed && input_callbacks.set_rumble != nullptr) {
+         input_callbacks.set_rumble(pfs->channel, flag);
+     }
+ 
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index 9944a02..63a082f 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -1,20 +1,178 @@
++#include <array>
+ #include <bitset>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <memory>
++#include <mutex>
+ #include <thread>
++#include <utility>
++#include <vector>
+ 
+ #include "blockingconcurrentqueue.h"
++#if defined(GEKKO)
++#include "lightweightsemaphore.h"
++#endif
+ 
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+ 
++struct MessageDeliveryState {
++    std::mutex mutex;
++    std::condition_variable condition;
++    ultramodern::EventMessageSource source = ultramodern::EventMessageSource::Sp;
++    bool complete = false;
++};
++
+ struct QueuedMessage {
+     PTR(OSMesgQueue) mq;
+     OSMesg mesg;
+     bool jam;
+     bool requeue_if_blocked;
++    std::shared_ptr<MessageDeliveryState> delivery;
+ };
+ 
+-static moodycamel::BlockingConcurrentQueue<QueuedMessage> external_messages {};
++// This queue is the wakeup path for emulated hardware events. A conventional
++// FIFO provides deterministic producer ordering and wakeups at N64 event rates.
++#if defined(GEKKO)
++extern "C" float dkr_wii_cfg(const char* key, float def);
++// Periode (us) des attentes par sondage des files d'evenements externes (cfg `pollus`, defaut 1000).
++static inline int wii_poll_us() {
++    static int v = static_cast<int>(dkr_wii_cfg("pollus", 1000.0F));
++    return v < 50 ? 50 : v;
++}
++#endif
++class ExternalMessageQueue {
++public:
++    bool enqueue(QueuedMessage message) {
++        {
++            std::lock_guard lock{ mutex_ };
++            messages_.push_back(std::move(message));
++        }
++        condition_.notify_one();
++#if defined(GEKKO)
++        wake_sema_.signal(); // reveille un attenteur bloquant (vrai blocage LWP, sans sondage)
++#endif
++        return true;
++    }
++
++    bool try_dequeue(QueuedMessage& message) {
++        std::lock_guard lock{ mutex_ };
++        if (messages_.empty()) {
++            return false;
++        }
++        message = std::move(messages_.front());
++        messages_.pop_front();
++        return true;
++    }
++
++    void wait_dequeue(QueuedMessage& message) {
++        std::unique_lock lock{ mutex_ };
++#if defined(GEKKO)
++        // Attente bloquante par semaphore LWP : le thread inactif du jeu ne se reveille plus 5000 fois par seconde.
++        while (messages_.empty()) {
++            lock.unlock();
++            wake_sema_.wait();
++            lock.lock();
++        }
++#else
++        condition_.wait(lock, [this] { return !messages_.empty(); });
++#endif
++        message = std::move(messages_.front());
++        messages_.pop_front();
++    }
++
++    template <typename Rep, typename Period>
++    bool wait_dequeue_timed(
++        QueuedMessage& message,
++        const std::chrono::duration<Rep, Period>& timeout) {
++        std::unique_lock lock{ mutex_ };
++#if defined(GEKKO)
++        // Sur Wii/libogc, condition_variable::wait_for avec timeout std::chrono
++        // peut bloquer indéfiniment si le timer système time_point n'incrémente pas la condition.
++        // On effectue une boucle de sommeil court pour garantir le retour sans deadlock.
++        const auto deadline = std::chrono::steady_clock::now() + timeout;
++        while (messages_.empty()) {
++            lock.unlock();
++            std::this_thread::sleep_for(std::chrono::microseconds{wii_poll_us()});
++            lock.lock();
++            if (std::chrono::steady_clock::now() >= deadline) {
++                break;
++            }
++        }
++        if (messages_.empty()) {
++            return false;
++        }
++#else
++        if (!condition_.wait_for(lock, timeout,
++                                 [this] { return !messages_.empty(); })) {
++            return false;
++        }
++#endif
++        message = std::move(messages_.front());
++        messages_.pop_front();
++        return true;
++    }
++
++private:
++    std::mutex mutex_;
++    std::condition_variable condition_;
++    std::deque<QueuedMessage> messages_;
++#if defined(GEKKO)
++    moodycamel::LightweightSemaphore wake_sema_{0, 0};
++#endif
++};
++
++static ExternalMessageQueue external_messages{};
++static std::mutex pending_delivery_mutex;
++static std::array<std::deque<std::shared_ptr<MessageDeliveryState>>, 32>
++    pending_deliveries;
+ std::bitset<32> requeue_enabled;
++extern std::atomic_bool exited;
++
++static void complete_delivery(const std::shared_ptr<MessageDeliveryState>& delivery) {
++    if (delivery == nullptr) {
++        return;
++    }
++    {
++        std::lock_guard lock{ delivery->mutex };
++        delivery->complete = true;
++    }
++    delivery->condition.notify_all();
++}
++
++void ultramodern::reset_external_message_state() {
++    std::vector<std::shared_ptr<MessageDeliveryState>> deliveries;
++    QueuedMessage queued{};
++    while (external_messages.try_dequeue(queued)) {
++        if (queued.delivery != nullptr) {
++            deliveries.push_back(std::move(queued.delivery));
++        }
++    }
++
++    {
++        std::lock_guard lock{ pending_delivery_mutex };
++        for (auto& pending : pending_deliveries) {
++            while (!pending.empty()) {
++                deliveries.push_back(std::move(pending.front()));
++                pending.pop_front();
++            }
++        }
++    }
++
++    for (const auto& delivery : deliveries) {
++        complete_delivery(delivery);
++    }
++}
++
++static void defer_delivery_completion(
++    const std::shared_ptr<MessageDeliveryState>& delivery) {
++    if (delivery == nullptr) {
++        return;
++    }
++    std::lock_guard lock{ pending_delivery_mutex };
++    pending_deliveries[static_cast<std::size_t>(delivery->source)].push_back(delivery);
++}
+ 
+ void ultramodern::set_message_queue_control(const ultramodern::MessageQueueControl& mqc) {
+     requeue_enabled.reset();
+@@ -27,22 +185,79 @@ void ultramodern::set_message_queue_control(const ultramodern::MessageQueueContr
+     requeue_enabled.set(static_cast<int>(EventMessageSource::Dp), mqc.requeue_dp);
+ }
+ 
++void ultramodern::acknowledge_external_message_src(EventMessageSource src) {
++    std::shared_ptr<MessageDeliveryState> delivery;
++    {
++        std::lock_guard lock{ pending_delivery_mutex };
++        auto& pending = pending_deliveries[static_cast<std::size_t>(src)];
++        if (pending.empty()) {
++            return;
++        }
++        delivery = std::move(pending.front());
++        pending.pop_front();
++    }
++    // The acknowledgement is emitted by the emulated event handler after it
++    // has cleared the scheduler's active task pointer. Only now may a fast host
++    // worker publish the dependent completion edge.
++    complete_delivery(delivery);
++}
++
+ void ultramodern::enqueue_external_message_src(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src) {
+-    external_messages.enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)]});
++    if (mq == NULLPTR) {
++        return;
++    }
++    external_messages.enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)], {}});
++}
++
++bool ultramodern::enqueue_external_message_src_and_wait(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src) {
++    if (mq == NULLPTR) {
++        return true;
++    }
++    auto delivery = std::make_shared<MessageDeliveryState>();
++    delivery->source = src;
++    external_messages.enqueue({
++        mq, msg, jam, requeue_enabled[static_cast<int>(src)], delivery});
++    std::unique_lock lock{ delivery->mutex };
++    while (!delivery->complete && !exited.load()) {
++#if defined(GEKKO)
++        // condition_variable::wait_for peut rendre la main immediatement sur libogc : attente active a 100 % CPU. On dort explicitement.
++        lock.unlock();
++        std::this_thread::sleep_for(std::chrono::microseconds{wii_poll_us()});
++        lock.lock();
++#else
++        delivery->condition.wait_for(lock, std::chrono::milliseconds{1});
++#endif
++    }
++    return delivery->complete;
+ }
+ 
+ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool requeue_if_blocked) {
+-    external_messages.enqueue({mq, msg, jam, requeue_if_blocked});
++    if (mq == NULLPTR) {
++        return;
++    }
++    external_messages.enqueue({mq, msg, jam, requeue_if_blocked, {}});
++}
++
++void ultramodern::notify_external_message_waiters() {
++    external_messages.enqueue({NULLPTR, 0, false, false, {}});
+ }
+ 
+ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
+ 
+ void dequeue_external_messages(RDRAM_ARG1) {
++    if (exited.load()) {
++        throw ultramodern::thread_terminated{};
++    }
+     QueuedMessage to_send;
+     std::vector<QueuedMessage> requeued_messages{};
+     while (external_messages.try_dequeue(to_send)) {
+-        if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
++        const bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
++        if (!sent && to_send.requeue_if_blocked) {
+             requeued_messages.push_back(to_send);
++        } else if (sent) {
++            defer_delivery_completion(to_send.delivery);
++        } else {
++            complete_delivery(to_send.delivery);
+         }
+     }
+     for (QueuedMessage& cur_mesg : requeued_messages) {
+@@ -50,21 +265,63 @@ void dequeue_external_messages(RDRAM_ARG1) {
+     }
+ }
+ 
++extern "C" { volatile int g_in_ext_wait = 0; uint64_t g_extwait_ticks = 0; }
++#if defined(GEKKO)
++#include <ogc/lwp_watchdog.h>
++#endif
++#if defined(GEKKO)
++struct ExtWaitScope {
++    uint64_t t0;
++    ExtWaitScope() : t0(gettime()) { g_in_ext_wait = g_in_ext_wait + 1; }
++    ~ExtWaitScope() { g_extwait_ticks += gettime() - t0; g_in_ext_wait = g_in_ext_wait - 1; }
++};
++#define EXT_WAIT_SCOPE ExtWaitScope ext_wait_scope_guard;
++#else
++#define EXT_WAIT_SCOPE
++#endif
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
++    EXT_WAIT_SCOPE
+     QueuedMessage to_send;
+     external_messages.wait_dequeue(to_send);
+-    if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
++    if (exited.load()) {
++        throw ultramodern::thread_terminated{};
++    }
++    const bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
++    if (!sent && to_send.requeue_if_blocked) {
+         external_messages.enqueue(to_send);
++    } else if (sent) {
++        defer_delivery_completion(to_send.delivery);
++    } else {
++        complete_delivery(to_send.delivery);
+     }
+ }
+ 
+-void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
++extern "C" uint32_t g_external_messages_dequeued = 0;
++extern "C" uint32_t g_do_recv_loops = 0;
++extern "C" uint32_t g_recv_stage = 0;
++
++void ultramodern::wait_for_external_message_timed(RDRAM_ARG1, u32 millis) {
++    EXT_WAIT_SCOPE
++    if (exited.load()) {
++        throw ultramodern::thread_terminated{};
++    }
+     QueuedMessage to_send;
+     if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
+-        if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
++        if (exited.load()) {
++            throw ultramodern::thread_terminated{};
++        }
++        g_external_messages_dequeued++;
++        const bool sent = do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false);
++        if (!sent && to_send.requeue_if_blocked) {
+             external_messages.enqueue(to_send);
++        } else if (sent) {
++            defer_delivery_completion(to_send.delivery);
++        } else {
++            complete_delivery(to_send.delivery);
+         }
+     }
++    // Dépiler également tout autre message déjà prêt dans external_messages sans attendre
++    dequeue_external_messages(PASS_RDRAM1);
+ }
+ 
+ extern "C" void osCreateMesgQueue(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg, s32 count) {
+@@ -89,6 +346,10 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+     return MQ_GET_COUNT(mq) >= mq->msgCount;
+ }
+ 
++// Diagnostic de blocage : pour chaque id de thread N64, derniere file de messages attendue (op 1 = recv, 2 = send, 0 = rien).
++extern "C" { uint32_t g_blk_mq[64] = {}; uint8_t g_blk_op[64] = {}; }
++static inline void blk_set(uint32_t id, uint32_t mq, uint8_t op) { if (id < 64) { g_blk_mq[id] = mq; g_blk_op[id] = op; } }
++
+ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+     OSMesgQueue* mq = TO_PTR(OSMesgQueue, mq_);
+     if (!block) {
+@@ -101,9 +362,11 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+         // Otherwise, yield this thread until the queue has room.
+         while (MQ_IS_FULL(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on send\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
++            blk_set(static_cast<uint32_t>(TO_PTR(OSThread, ultramodern::this_thread())->id), static_cast<uint32_t>(mq_), 2);
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_send), ultramodern::this_thread());
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
++        blk_set(static_cast<uint32_t>(TO_PTR(OSThread, ultramodern::this_thread())->id), 0, 0);
+     }
+     
+     if (jam) {
+@@ -137,11 +400,21 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+         }
+     } else {
+         // Otherwise, yield this thread in a loop until the queue is no longer full
++        g_recv_stage = 4;
+         while (MQ_IS_EMPTY(mq)) {
++            g_recv_stage = 5;
++            g_do_recv_loops++;
+             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
+-            ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
+-            ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
++            blk_set(static_cast<uint32_t>(TO_PTR(OSThread, ultramodern::this_thread())->id), static_cast<uint32_t>(mq_), 1);
++            if (!ultramodern::thread_queue_empty(PASS_RDRAM ultramodern::running_queue)) {
++                ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
++                ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
++            } else {
++                // No other N64 thread is ready to run: wait for external event (VI/AI/SI/timers)
++                ultramodern::wait_for_external_message_timed(PASS_RDRAM1, 1);
++            }
+         }
++        blk_set(static_cast<uint32_t>(TO_PTR(OSThread, ultramodern::this_thread())->id), 0, 0);
+     }
+ 
+     if (msg_ != NULLPTR) {
+@@ -160,7 +433,10 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+     return true;
+ }
+ 
++extern "C" uint32_t g_send_mesg_calls;
++
+ extern "C" s32 osSendMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, s32 flags) {
++    g_send_mesg_calls++;
+     OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
+     bool jam = false;
+     
+@@ -204,19 +480,27 @@ extern "C" s32 osJamMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, s32 flags)
+     return sent ? 0 : -1;
+ }
+ 
++extern "C" uint32_t g_recv_mesg_calls;
++
+ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32 flags) {
++    g_recv_mesg_calls++;
++    g_recv_stage = 1;
+     OSMesgQueue *mq = TO_PTR(OSMesgQueue, mq_);
+     
+     assert(ultramodern::is_game_thread() && "RecvMesg not allowed outside of game threads.");
+     
+     // Handle any messages that have been received from an external thread.
++    g_recv_stage = 2;
+     dequeue_external_messages(PASS_RDRAM1);
++    g_recv_stage = 3;
+ 
+     // Try to receive a message.
+     bool received = do_recv(PASS_RDRAM mq_, msg_, flags == OS_MESG_BLOCK);
++    g_recv_stage = 6;
+     
+     // Check the queue to see if this thread should swap execution to another.
+     ultramodern::check_running_queue(PASS_RDRAM1);
++    g_recv_stage = 7;
+ 
+     return received ? 0 : -1;
+ }
+diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
+index a22f747..085010b 100644
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -1,5 +1,13 @@
+ #include "ultramodern/ultramodern.hpp"
+ 
++void resume_thread(OSThread* t);
++#if defined(GEKKO)
++extern "C" void dkr_trace(char code, int id);
++#define DKR_TRACE(c, id) dkr_trace((c), (id))
++#else
++#define DKR_TRACE(c, id) ((void)0)
++#endif
++
+ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+     debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
+     thread_queue_insert(PASS_RDRAM running_queue, t_);
+@@ -7,10 +15,14 @@ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+ }
+ 
+ void swap_to_thread(RDRAM_ARG OSThread *to) {
+-    debug_printf("[Scheduling] Thread %d giving execution to thread %d\n", TO_PTR(OSThread, ultramodern::this_thread())->id, to->id);
+-    // Insert this thread in the running queue.
+-    ultramodern::thread_queue_insert(PASS_RDRAM ultramodern::running_queue, ultramodern::this_thread());
+-    TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::QUEUED;
++    PTR(OSThread) self_ptr = ultramodern::this_thread();
++    if (self_ptr != NULLPTR) {
++        debug_printf("[Scheduling] Thread %d giving execution to thread %d\n", TO_PTR(OSThread, self_ptr)->id, to->id);
++        // Insert this thread in the running queue.
++        ultramodern::thread_queue_insert(PASS_RDRAM ultramodern::running_queue, self_ptr);
++        TO_PTR(OSThread, self_ptr)->state = OSThreadState::QUEUED;
++    }
++    DKR_TRACE('S', to->id);
+     // Unpause the target thread and wait for this one to be unpaused.
+     ultramodern::resume_thread_and_wait(PASS_RDRAM to);
+ }
+@@ -18,10 +30,26 @@ void swap_to_thread(RDRAM_ARG OSThread *to) {
+ void ultramodern::check_running_queue(RDRAM_ARG1) {
+     // Check if there are any threads in the running queue.
+     if (!thread_queue_empty(PASS_RDRAM running_queue)) {
++        PTR(OSThread) cur_thread_ptr = ultramodern::this_thread();
++        if (cur_thread_ptr == NULLPTR || cur_thread_ptr == 0) {
++            // Pas de thread N64 en cours (démarrage initial depuis mainproc ou TLS vide)
++            PTR(OSThread) pop_thread_ptr = ultramodern::thread_queue_pop(PASS_RDRAM running_queue);
++            if (pop_thread_ptr != NULLPTR && pop_thread_ptr != 0) {
++                OSThread* next_thread = TO_PTR(OSThread, pop_thread_ptr);
++                resume_thread(next_thread);
++            }
++            return;
++        }
++
++        PTR(OSThread) next_thread_ptr = ultramodern::thread_queue_peek(PASS_RDRAM running_queue);
++        if (next_thread_ptr == NULLPTR || next_thread_ptr == 0) {
++            return;
++        }
++
+         // Check if the highest priority thread in the queue is higher priority than the current thread.
+-        OSThread* next_thread = TO_PTR(OSThread, ultramodern::thread_queue_peek(PASS_RDRAM running_queue));
+-        OSThread* self = TO_PTR(OSThread, ultramodern::this_thread());
+-        if (next_thread->priority > self->priority) {
++        OSThread* next_thread = TO_PTR(OSThread, next_thread_ptr);
++        OSThread* self = TO_PTR(OSThread, cur_thread_ptr);
++        if (next_thread->priority >= self->priority) {
+             ultramodern::thread_queue_pop(PASS_RDRAM running_queue);
+             // Swap to the higher priority thread.
+             swap_to_thread(PASS_RDRAM next_thread);
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 6e3ed18..d48db19 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -27,12 +27,65 @@ std::string ultramodern::threads::get_game_thread_name(const OSThread* t) {
+     return threads_callbacks.get_game_thread_name(t);
+ }
+ 
++#if defined(GEKKO)
++extern "C" void dkr_name_thread(const char* name);
++#endif
+ extern "C" void bootproc();
+ 
+ thread_local bool is_entrypoint_thread = false;
+ // Whether this thread is part of the game (i.e. the start thread or one spawned by osCreateThread)
+ thread_local bool is_game_thread = false;
+ thread_local PTR(OSThread) thread_self = NULLPTR;
++extern std::atomic_bool exited;
++
++#if defined(GEKKO)
++#include <ogc/lwp_watchdog.h>
++// Temps CPU (ticks) passe par chaque thread N64 entre deux reprises ; g_extwait_ticks : temps passe a attendre un evenement externe.
++extern "C" {
++uint64_t g_thr_ticks[64] = {};
++uint64_t g_thr_last = 0;
++int g_thr_cur = 0;
++}
++static inline void thr_account(int new_id) {
++    const uint64_t now = gettime();
++    if (g_thr_last != 0) g_thr_ticks[g_thr_cur & 63] += now - g_thr_last;
++    g_thr_last = now;
++    g_thr_cur = new_id;
++}
++static std::atomic<PTR(OSThread)> g_current_n64_thread{NULLPTR};
++
++void ultramodern::set_current_n64_thread(PTR(OSThread) t) {
++    g_current_n64_thread.store(t);
++}
++
++extern "C" uint32_t g_threads_started;
++extern "C" uint32_t g_threads_created;
++extern "C" uint32_t g_thread_func_entered = 0;
++extern "C" uint32_t g_thread_last_id_started = 0;
++// [0]=host thread spawned [1]=initialized signaled [2]=resume wait returned [3]=context mismatch
++// [4]=run_thread_function returned [5]=thread_terminated caught [6]=resume_thread calls
++extern "C" uint32_t g_thr_dbg[8] = {};
++// Ring buffer of scheduler events: (char code << 8) | thread id
++extern "C" uint32_t g_trace_ring[16] = {};
++extern "C" uint32_t g_trace_idx = 0;
++extern "C" void dkr_trace(char code, int id) {
++    g_trace_ring[g_trace_idx++ & 15] = (static_cast<uint32_t>(code) << 8) | (static_cast<uint32_t>(id) & 0xFF);
++}
++#define DKR_TRACE(c, id) dkr_trace((c), (id))
++#else
++#define DKR_TRACE(c, id) ((void)0)
++#endif
++
++PTR(OSThread) ultramodern::this_thread() {
++#if defined(GEKKO)
++    // thread_local storage is shared between libogc threads, so thread_self cannot be trusted here.
++    // Only one N64 thread runs at a time and each publishes itself when it is resumed. The entrypoint
++    // thread must see "no current thread" until the first N64 thread has actually started running.
++    return g_current_n64_thread.load();
++#else
++    return thread_self;
++#endif
++}
+ 
+ void ultramodern::set_entrypoint_thread() {
+     ::is_game_thread = true;
+@@ -147,19 +200,34 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+     pthread_setname_np(name.c_str());
+ }
+ 
++#elif defined(GEKKO)
++void ultramodern::set_native_thread_name(const std::string& name) {}
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
+ #endif
+ 
+-void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
++void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context, PTR(OSThread) self_ptr) {
++    DKR_TRACE('W', self_ptr != NULLPTR ? TO_PTR(OSThread, self_ptr)->id : 99);
+     thread_context->running.wait();
++    DKR_TRACE('R', self_ptr != NULLPTR ? TO_PTR(OSThread, self_ptr)->id : 99);
++#if defined(GEKKO)
++    // Only one N64 thread runs at a time: publish this one as the current thread.
++    // Do not rely on thread_local storage here, it is unreliable on libogc threads.
++    if (self_ptr != NULLPTR) {
++        ultramodern::set_current_n64_thread(self_ptr);
++        thr_account(static_cast<int>(TO_PTR(OSThread, self_ptr)->id));
++    }
++#endif
+     // If this thread's context was replaced by another thread or deleted, destroy it again from its own context.
+     // This will trigger thread cleanup instead.
+-    if (TO_PTR(OSThread, ultramodern::this_thread())->context != thread_context) {
++    if (self_ptr != NULLPTR && TO_PTR(OSThread, self_ptr)->context != thread_context) {
+         osDestroyThread(PASS_RDRAM NULLPTR);
+     }
+ }
+ 
+ void resume_thread(OSThread* t) {
++#if defined(GEKKO)
++    g_thr_dbg[6]++;
++#endif
+     debug_printf("[Thread] Resuming execution of thread %d\n", t->id);
+     t->context->running.signal();
+ }
+@@ -170,27 +238,49 @@ void run_next_thread(RDRAM_ARG1) {
+     }
+ 
+     OSThread* to_run = TO_PTR(OSThread, ultramodern::thread_queue_pop(PASS_RDRAM ultramodern::running_queue));
++    DKR_TRACE('N', to_run->id);
+     debug_printf("[Scheduling] Resuming execution of thread %d\n", to_run->id);
+     to_run->context->running.signal();
+ }
+ 
+ void ultramodern::run_next_thread_and_wait(RDRAM_ARG1) {
+-    UltraThreadContext* cur_context = TO_PTR(OSThread, thread_self)->context;
++    PTR(OSThread) cur = ultramodern::this_thread();
++    UltraThreadContext* cur_context = (cur != NULLPTR) ? TO_PTR(OSThread, cur)->context : nullptr;
+     run_next_thread(PASS_RDRAM1);
+-    wait_for_resumed(PASS_RDRAM cur_context);
++    if (cur_context != nullptr) {
++        wait_for_resumed(PASS_RDRAM cur_context, cur);
++    }
+ }
+ 
+ void ultramodern::resume_thread_and_wait(RDRAM_ARG OSThread *t) {
+-    UltraThreadContext* cur_context = TO_PTR(OSThread, thread_self)->context;
++    PTR(OSThread) cur = ultramodern::this_thread();
++    UltraThreadContext* cur_context = (cur != NULLPTR) ? TO_PTR(OSThread, cur)->context : nullptr;
+     resume_thread(t);
+-    wait_for_resumed(PASS_RDRAM cur_context);
++    if (cur_context != nullptr) {
++        wait_for_resumed(PASS_RDRAM cur_context, cur);
++    }
+ }
+ 
++#if defined(GEKKO)
++extern "C" float dkr_wii_cfg(const char* key, float def);
++#endif
+ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entrypoint, PTR(void) arg, UltraThreadContext* thread_context) {
++#if defined(GEKKO)
++    // Mode non-IEEE (FPSCR[NI]) : les resultats denormalises sont vides au lieu de passer par un chemin tres lent sur Broadway.
++    if (dkr_wii_cfg("fpni", 1.0F) != 0.0F) {
++        asm volatile("mtfsb1 29");
++    }
++#endif
+     OSThread *self = TO_PTR(OSThread, self_);
+     debug_printf("[Thread] Thread created: %d\n", self->id);
++#if defined(GEKKO)
++    { char nm[16]; std::snprintf(nm, sizeof(nm), "n64-%d", static_cast<int>(self->id)); dkr_name_thread(nm); }
++#endif
+     thread_self = self_;
+     is_game_thread = true;
++#if defined(GEKKO)
++    g_thr_dbg[0]++;
++#endif
+ 
+     // Set the thread name
+     ultramodern::set_native_thread_name(ultramodern::threads::get_game_thread_name(self));
+@@ -198,25 +288,45 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+ 
+     // Signal the initialized semaphore to indicate that this thread can be started.
+     thread_context->initialized.signal();
++#if defined(GEKKO)
++    g_thr_dbg[1]++;
++#endif
+ 
+     debug_printf("[Thread] Thread waiting to be started: %d\n", self->id);
+ 
+     // Wait until the thread is marked as running.
+     try {
+-        wait_for_resumed(PASS_RDRAM thread_context);
++        wait_for_resumed(PASS_RDRAM thread_context, self_);
++#if defined(GEKKO)
++        g_thr_dbg[2]++;
++#endif
+     } catch (ultramodern::thread_terminated& terminated) {
+     }
+ 
+     // Make sure the thread wasn't replaced or destroyed before it was started.
+     if (self->context == thread_context) {
+         debug_printf("[Thread] Thread started: %d\n", self->id);
++#if defined(GEKKO)
++        g_current_n64_thread.store(self_);
++        g_thread_func_entered++;
++        g_thread_last_id_started = self->id;
++#endif
+         try {
+             // Run the thread's function with the provided argument.
+             run_thread_function(PASS_RDRAM entrypoint, self->sp, arg);
++#if defined(GEKKO)
++            g_thr_dbg[4]++;
++#endif
+         } catch (ultramodern::thread_terminated& terminated) {
++#if defined(GEKKO)
++            g_thr_dbg[5]++;
++#endif
+         }
+     }
+     else {
++#if defined(GEKKO)
++        g_thr_dbg[3]++;
++#endif
+         debug_printf("[Thread] Thread destroyed before being started: %d\n", self->id);
+     }
+ 
+@@ -224,19 +334,27 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+     // so mark this thread as destroyed and run the next queued thread.
+     if (self->context == thread_context) {
+         self->context = nullptr;
+-        run_next_thread(PASS_RDRAM1);
++        if (!exited.load()) {
++            run_next_thread(PASS_RDRAM1);
++        }
+     }
+ 
+     // Dispose of this thread now that it's completed or terminated.
+     ultramodern::cleanup_thread(thread_context);
+ }
+ 
++
++
++
+ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
+     OSThread* t = TO_PTR(OSThread, t_);
+     debug_printf("[os] Start Thread %d\n", t->id);
++    g_threads_started++;
+ 
+     // If this is a game thread, insert the new thread into the running queue and then check the running queue.
+-    if (thread_self) {
++    // (The first thread is started from the entrypoint thread, where this_thread() is still null; the
++    // started thread publishes itself as the current thread once it runs, see _thread_func.)
++    if (ultramodern::this_thread() != NULLPTR) {
+         ultramodern::schedule_running_thread(PASS_RDRAM t_);
+         ultramodern::check_running_queue(PASS_RDRAM1);
+     }
+@@ -244,12 +362,12 @@ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
+     else {
+         t->state = OSThreadState::QUEUED;
+         resume_thread(t);
+-        //throw ultramodern::thread_terminated{};
+     }
+ }
+ 
+ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_func_t) entrypoint, PTR(void) arg, PTR(void) sp, OSPri pri) {
+     debug_printf("[os] Create Thread %d\n", id);
++    g_threads_created++;
+     OSThread *t = TO_PTR(OSThread, t_);
+     
+     t->next = NULLPTR;
+@@ -272,10 +390,10 @@ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_f
+ 
+ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+     if (t_ == NULLPTR) {
+-        t_ = thread_self;
++        t_ = ultramodern::this_thread();
+     }
+-    // Check if the thread is stopping itself (arg is null or thread_self).
+-    if (t_ == thread_self) {
++    // Check if the thread is stopping itself (arg is null or ultramodern::this_thread()).
++    if (t_ == ultramodern::this_thread()) {
+         ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+     }
+     else {
+@@ -285,11 +403,11 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+ 
+ extern "C" void osDestroyThread(RDRAM_ARG PTR(OSThread) t_) {
+     if (t_ == NULLPTR) {
+-        t_ = thread_self;
++        t_ = ultramodern::this_thread();
+     }
+     OSThread* t = TO_PTR(OSThread, t_);
+-    // Check if the thread is destroying itself (arg is null or thread_self)
+-    if (t_ == thread_self) {
++    // Check if the thread is destroying itself (arg is null or ultramodern::this_thread())
++    if (t_ == ultramodern::this_thread()) {
+         throw ultramodern::thread_terminated{};
+     }
+     // Otherwise if the thread isn't stopped, remove it from its currrent queue., 
+@@ -307,7 +425,7 @@ extern "C" void osDestroyThread(RDRAM_ARG PTR(OSThread) t_) {
+ 
+ extern "C" void osSetThreadPri(RDRAM_ARG PTR(OSThread) t_, OSPri pri) {
+     if (t_ == NULLPTR) {
+-        t_ = thread_self;
++        t_ = ultramodern::this_thread();
+     }
+     OSThread* t = TO_PTR(OSThread, t_);
+ 
+@@ -325,40 +443,58 @@ extern "C" void osSetThreadPri(RDRAM_ARG PTR(OSThread) t_, OSPri pri) {
+ 
+ extern "C" OSPri osGetThreadPri(RDRAM_ARG PTR(OSThread) t) {
+     if (t == NULLPTR) {
+-        t = thread_self;
++        t = ultramodern::this_thread();
+     }
+     return TO_PTR(OSThread, t)->priority;
+ }
+ 
+ extern "C" OSId osGetThreadId(RDRAM_ARG PTR(OSThread) t) {
+     if (t == NULLPTR) {
+-        t = thread_self;
++        t = ultramodern::this_thread();
+     }
+     return TO_PTR(OSThread, t)->id;
+ }
+ 
+-PTR(OSThread) ultramodern::this_thread() {
+-    return thread_self;
+-}
++
+ 
+ static std::thread thread_cleaner_thread;
+ static moodycamel::BlockingConcurrentQueue<UltraThreadContext*> deleted_threads{};
+ extern std::atomic_bool exited;
+ 
++static void delete_thread_context(UltraThreadContext* context) {
++    if (context == nullptr) {
++        return;
++    }
++    if (context->host_thread.joinable()) {
++        context->host_thread.join();
++    }
++    delete context;
++}
++
++static void drain_deleted_threads() {
++    UltraThreadContext* context = nullptr;
++    while (deleted_threads.try_dequeue(context)) {
++        delete_thread_context(context);
++    }
++}
++
+ void thread_cleaner_func() {
++#if defined(GEKKO)
++    dkr_name_thread("cleaner");
++#endif
+     using namespace std::chrono_literals;
+     while (!exited) {
+         UltraThreadContext* to_delete;
+         if (deleted_threads.wait_dequeue_timed(to_delete, 10ms)) {
+             debug_printf("[Cleanup] Deleting thread context %p\n", to_delete);
+ 
+-            to_delete->host_thread.join();
+-            delete to_delete;
++            delete_thread_context(to_delete);
+         }
+     }
+ }
+ 
+ void ultramodern::init_thread_cleanup() {
++    drain_deleted_threads();
+     thread_cleaner_thread = std::thread{thread_cleaner_func};
+ }
+ 
+@@ -367,5 +503,8 @@ void ultramodern::cleanup_thread(UltraThreadContext *cur_context) {
+ }
+ 
+ void ultramodern::join_thread_cleaner_thread() {
+-    thread_cleaner_thread.join();
++    if (thread_cleaner_thread.joinable()) {
++        thread_cleaner_thread.join();
++    }
++    drain_deleted_threads();
+ }
+diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
+index ee26c45..a26eca3 100644
+--- a/ultramodern/src/timer.cpp
++++ b/ultramodern/src/timer.cpp
+@@ -37,7 +37,9 @@ struct RemoveTimerAction {
+     PTR(OSTimer) timer;
+ };
+ 
+-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
++struct ShutdownTimerAction {};
++
++using Action = std::variant<AddTimerAction, RemoveTimerAction, ShutdownTimerAction>;
+ 
+ struct {
+     std::thread thread;
+@@ -66,7 +68,13 @@ uint64_t time_now() {
+     return duration_to_ticks(std::chrono::high_resolution_clock::now() - start_time);
+ }
+ 
++#if defined(GEKKO)
++extern "C" void dkr_name_thread(const char* name);
++#endif
+ void timer_thread(RDRAM_ARG1) {
++#if defined(GEKKO)
++    dkr_name_thread("timer");
++#endif
+     ultramodern::set_native_thread_name("Timer Thread");
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::VeryHigh);
+ 
+@@ -94,20 +102,27 @@ void timer_thread(RDRAM_ARG1) {
+             active_timers.insert(add_action->timer);
+         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
+             active_timers.erase(remove_action->timer);
++        } else if (std::holds_alternative<ShutdownTimerAction>(action)) {
++            return false;
+         }
++        return true;
+     };
+ 
+     while (true) {
+         // Empty the action queue
+         Action cur_action;
+         while (timer_context.action_queue.try_dequeue(cur_action)) {
+-            process_timer_action(cur_action);
++            if (!process_timer_action(cur_action)) {
++                return;
++            }
+         }
+ 
+         // If there's no timer to act on, wait for one to come in from the action queue
+         while (active_timers.empty()) {
+             timer_context.action_queue.wait_dequeue(cur_action);
+-            process_timer_action(cur_action);
++            if (!process_timer_action(cur_action)) {
++                return;
++            }
+         }
+ 
+         // Get the timer that's closest to running out
+@@ -126,7 +141,9 @@ void timer_thread(RDRAM_ARG1) {
+             // Add the current timer back to the queue (done first in case the action is to remove this timer)
+             active_timers.insert(cur_timer_);
+             // Process the new action
+-            process_timer_action(cur_action);
++            if (!process_timer_action(cur_action)) {
++                return;
++            }
+         }
+         else {
+             // Waiting for the timer completed, so send the timer's message to its message queue
+@@ -141,8 +158,22 @@ void timer_thread(RDRAM_ARG1) {
+ }
+ 
+ void ultramodern::init_timers(RDRAM_ARG1) {
++    Action stale_action;
++    while (timer_context.action_queue.try_dequeue(stale_action)) {}
++    start_time = std::chrono::high_resolution_clock::now();
++    ostime_offset = 0;
+     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
+-    timer_context.thread.detach();
++}
++
++void ultramodern::join_timer_thread() {
++    if (!timer_context.thread.joinable()) {
++        return;
++    }
++    timer_context.action_queue.enqueue(ShutdownTimerAction{});
++    timer_context.thread.join();
++
++    Action stale_action;
++    while (timer_context.action_queue.try_dequeue(stale_action)) {}
+ }
+ 
+ uint32_t ultramodern::get_speed_multiplier() {
+diff --git a/ultramodern/src/ultrainit.cpp b/ultramodern/src/ultrainit.cpp
+index af5132c..6a6d1da 100644
+--- a/ultramodern/src/ultrainit.cpp
++++ b/ultramodern/src/ultrainit.cpp
+@@ -23,8 +23,8 @@ void ultramodern::set_callbacks(
+ 
+ void ultramodern::preinit(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
+     ultramodern::set_entrypoint_thread();
+-    ultramodern::init_events(PASS_RDRAM window_handle);
+     ultramodern::init_timers(PASS_RDRAM1);
++    ultramodern::init_events(PASS_RDRAM window_handle);
+     ultramodern::init_audio();
+     ultramodern::init_thread_cleanup();
+ }
